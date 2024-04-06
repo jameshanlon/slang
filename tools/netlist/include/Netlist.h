@@ -234,6 +234,9 @@ public:
     NetlistPortDeclaration(const ast::Symbol& symbol) :
         NetlistNode(NodeKind::PortDeclaration, symbol) {}
 
+    NetlistPortDeclaration(const ast::Symbol& symbol, const std::string& hierarchicalPath) :
+        NetlistNode(NodeKind::PortDeclaration, symbol), hierarchicalPath(hierarchicalPath) {}
+
     static bool isKind(NodeKind otherKind) { return otherKind == NodeKind::PortDeclaration; }
 
 public:
@@ -333,6 +336,19 @@ public:
         auto nodePtr = std::make_unique<NetlistPortDeclaration>(symbol);
         auto& node = nodePtr->as<NetlistPortDeclaration>();
         symbol.getHierarchicalPath(node.hierarchicalPath);
+        SLANG_ASSERT(lookupPort(nodePtr->hierarchicalPath) == nullptr &&
+                     "Port declaration already exists");
+        nodes.push_back(std::move(nodePtr));
+        DEBUG_PRINT("Add port decl {}\n", node.hierarchicalPath);
+        return node;
+    }
+
+    /// Add a port declaration node to the netlist with the given hierarchical
+    /// path.
+    NetlistPortDeclaration& addPortDeclaration(const ast::Symbol & symbol,
+                                               const std::string & hierarchicalPath) {
+        auto nodePtr = std::make_unique<NetlistPortDeclaration>(symbol, hierarchicalPath);
+        auto& node = nodePtr->as<NetlistPortDeclaration>();
         SLANG_ASSERT(lookupPort(nodePtr->hierarchicalPath) == nullptr &&
                      "Port declaration already exists");
         nodes.push_back(std::move(nodePtr));

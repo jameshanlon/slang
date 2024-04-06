@@ -8,26 +8,25 @@
 //------------------------------------------------------------------------------
 #pragma once
 
-#include "Config.h"
 #include "Debug.h"
 #include "Netlist.h"
-#include "fmt/color.h"
-#include "fmt/format.h"
+#include "fmt/core.h"
 #include <algorithm>
-#include <iostream>
 
 #include "slang/ast/ASTContext.h"
 #include "slang/ast/ASTVisitor.h"
 #include "slang/ast/Compilation.h"
 #include "slang/ast/EvalContext.h"
+#include "slang/ast/Scope.h"
 #include "slang/ast/SemanticFacts.h"
 #include "slang/ast/Symbol.h"
 #include "slang/ast/symbols/BlockSymbols.h"
 #include "slang/ast/symbols/CompilationUnitSymbols.h"
+#include "slang/ast/symbols/InstanceSymbols.h"
+#include "slang/ast/symbols/MemberSymbols.h"
+#include "slang/ast/symbols/PortSymbols.h"
 #include "slang/ast/symbols/ValueSymbol.h"
 #include "slang/diagnostics/TextDiagnosticClient.h"
-#include "slang/syntax/SyntaxTree.h"
-#include "slang/syntax/SyntaxVisitor.h"
 #include "slang/util/Util.h"
 
 using namespace slang;
@@ -375,14 +374,79 @@ private:
     SmallVector<NetlistNode*> condVarsStack;
 };
 
+/// Hold the information relating to a port contained within an interface port
+/// of an instance in order that it can be flattened an appear as a regular
+/// port in the netlist.
+class FlatInterfacePort {
+public:
+  ast::InstanceSymbol const &instance;
+  ast::InterfacePortSymbol const &iface;
+  ast::Symbol const &port;
+  ast::ArgumentDirection direction;
+
+  FlatInterfacePort(ast::InstanceSymbol const& instance, ast::InterfacePortSymbol const& iface,
+                    ast::Symbol const& port) :
+      instance(instance),
+      iface(iface), port(port) {}
+
+  /// Return the effective hierarchical path for this flattened port.
+  auto getHierarchicalPath() -> std::string {
+   return fmt::format("{}.{}.{}", getSymbolHierPath(instance), iface.name, port.name);
+  }
+};
+
 /// A visitor that traverses the AST and builds a netlist representation.
 class NetlistVisitor : public ast::ASTVisitor<NetlistVisitor, true, false> {
 public:
     explicit NetlistVisitor(ast::Compilation& compilation, Netlist& netlist) :
         compilation(compilation), netlist(netlist) {}
 
-    /// Connect ports of a module instance to their corresponding variables.
-    void connectInstancePort(NetlistNode& port) {
+    /// Connect the ports of a module instance to the variables that connect to
+    /// it in the parent scope. Given a port hookup of the form:
+    ///
+    ///   .foo(expr(x, y))
+    ///
+    /// Where expr() is an expression involving some variables.
+    ///
+    /// Then, add the following edges:
+    ///
+    /// - Input port:
+    ///
+    ///   var decl x -> var ref x -> port var ref foo
+    ///
+    /// - Output port:
+    ///
+    ///   var decl y <- var ref y <- port var ref foo
+    ///
+    /// - InOut port:
+    ///
+    ///   var decl x -> var ref x -> port var ref foo
+    ///   var decl y <- var ref y <- port var ref foo
+    void connectPortExternal(NetlistNode* node, ast::Symbol const& portSymbol,
+                             ast::ArgumentDirection direction) {
+        switch (direction) {
+            case ast::ArgumentDirection::In:
+                connectDeclToVar(netlist, *node, getSymbolHierPath(node->symbol));
+                connectVarToDecl(netlist, *node, getSymbolHierPath(portSymbol));
+                break;
+            case ast::ArgumentDirection::Out:
+                connectDeclToVar(netlist, *node, getSymbolHierPath(portSymbol));
+                connectVarToDecl(netlist, *node, getSymbolHierPath(node->symbol));
+                break;
+            case ast::ArgumentDirection::InOut:
+                connectDeclToVar(netlist, *node, getSymbolHierPath(node->symbol));
+                connectDeclToVar(netlist, *node, getSymbolHierPath(portSymbol));
+                connectVarToDecl(netlist, *node, getSymbolHierPath(node->symbol));
+                connectVarToDecl(netlist, *node, getSymbolHierPath(portSymbol));
+                break;
+            case ast::ArgumentDirection::Ref:
+                break;
+        }
+    }
+
+    /// Connect the ports of a module instance to their corresponding variables
+    /// occuring in the body of the module.
+    void connectPortInternal(NetlistNode& port) {
         if (auto* internalSymbol = port.symbol.as<ast::PortSymbol>().internalSymbol) {
             std::string pathBuffer;
             internalSymbol->getHierarchicalPath(pathBuffer);
@@ -407,6 +471,174 @@ public:
         }
     }
 
+    /// Given an interface port symbol, return a list of ports defined by the
+    /// interface instance and any modport specifier.
+    auto getFlatIfacePorts(ast::InstanceSymbol const &instance, ast::InterfacePortSymbol const& ifacePort)
+        -> SmallVector<FlatInterfacePort> {
+
+        // Get the interface instance.
+        const ast::Symbol* conn;
+        const ast::ModportSymbol* modport = nullptr;
+        std::tie(conn, modport) = ifacePort.getConnection();
+        if (!conn) {
+          // Bad.
+          return {};
+        }
+
+        // Unwrap any array dimensions.
+        SmallVector<ConstantRange, 4> dims;
+        auto origSymbol = conn;
+        while (conn->kind == ast::SymbolKind::InstanceArray) {
+            auto& array = conn->as<ast::InstanceArraySymbol>();
+            if (array.elements.empty()) {
+              // Bad.
+              return {};
+            }
+
+            dims.push_back(array.range);
+            conn = array.elements[0];
+        }
+
+        // Get the interface instance body.
+        const ast::InstanceBodySymbol* iface = nullptr;
+        if (conn->kind == ast::SymbolKind::Modport) {
+            modport = &conn->as<ast::ModportSymbol>();
+            iface = &conn->getParentScope()->asSymbol().as<ast::InstanceBodySymbol>();
+        }
+        else {
+            iface = &conn->as<ast::InstanceSymbol>().body;
+        }
+
+        // Ports
+        if (modport) {
+          DEBUG_PRINT("Interface modport: {}\n", modport->name);
+        }
+
+        SmallVector<FlatInterfacePort, 8> ports;
+
+        // Add all interface members to the list of flattened ports.
+        for (auto& member : iface->members()) {
+          std::string path;
+          member.getHierarchicalPath(path);
+          if (member.kind != ast::SymbolKind::Modport) {
+              DEBUG_PRINT("Interface member: instance={} port={} name={} path={}\n", instance.name,
+                          ifacePort.name, member.name, path);
+              ports.emplace_back(instance, ifacePort, member);
+          }
+        }
+
+        // Apply modport direction constraints.
+        for (auto& member : iface->members()) {
+          std::string path;
+          member.getHierarchicalPath(path);
+          if (member.kind == ast::SymbolKind::Modport && member.name == modport->name) {
+            DEBUG_PRINT("Interface modport: instance={} port={} name={} path={}\n", instance.name,
+                        ifacePort.name, member.name, path);
+            for (auto& modportMember : member.as<ast::ModportSymbol>().members()) {
+                    if (modportMember.kind == ast::SymbolKind::ModportPort) {
+                        auto& port = modportMember.as<ast::ModportPortSymbol>();
+                        DEBUG_PRINT("Modport port member: name={} direction={}\n", port.name,
+                                    int(port.direction));
+                        auto it = std::find_if(ports.begin(), ports.end(),
+                                            [&port](FlatInterfacePort const& p) {
+                                                return p.port.name == port.name;
+                                            });
+                        if (it != ports.end()) {
+                            it->direction = port.direction;
+                        }
+                        else {
+                            SLANG_ASSERT(0 && "modport name not found in interface");
+                        }
+                    }
+            }
+          }
+        }
+
+        return ports;
+    }
+
+    // Handle making connections from the port connections to the port
+    // declarations of an instance.
+    auto handleInstanceExtPortConn(ast::InstanceSymbol const &symbol) {
+
+        for (auto* portConnection : symbol.getPortConnections()) {
+
+            if (portConnection->port.kind == ast::SymbolKind::Port) {
+                auto& port = portConnection->port.as<ast::PortSymbol>();
+                auto direction = portConnection->port.as<ast::PortSymbol>().direction;
+
+                ast::EvalContext evalCtx(
+                  ast::ASTContext(compilation.getRoot(), ast::LookupLocation::max));
+
+                // The port is the target of an assignment if it is an input.
+                bool isLeftOperand = direction == ast::ArgumentDirection::In ||
+                                     direction == ast::ArgumentDirection::InOut;
+
+                // Collect variable references in the port expression.
+                VariableReferenceVisitor visitor(netlist, evalCtx, isLeftOperand);
+                portConnection->getExpression()->visit(visitor);
+
+                for (auto* node : visitor.getVars()) {
+                  connectPortExternal(node, portConnection->port, direction);
+                }
+            }
+            else if (portConnection->port.kind == ast::SymbolKind::MultiPort) {
+                auto& port = portConnection->port.as<ast::MultiPortSymbol>();
+                // TODO
+                assert(0 && "unimplemented");
+            }
+            else if (portConnection->port.kind == ast::SymbolKind::InterfacePort) {
+                auto& ifacePort = portConnection->port.as<ast::InterfacePortSymbol>();
+                auto ifacePortList = getFlatIfacePorts(symbol, ifacePort);
+
+                for (auto &flatPort : ifacePortList) {
+                    auto* portNode = netlist.lookupVariable(getSymbolHierPath(flatPort.port));
+                    // TODO
+                    //connectPortExternal(portNode, , flatPort.direction);
+                }
+
+            } else {
+              SLANG_UNREACHABLE;
+            }
+        }
+    }
+
+    /// Handle making connections form port members to internal variable
+    /// declarations. This must be called before 'handleInstanceExtPortConn'
+    /// becuase it creates the port declarations in the netlist that are
+    /// connected to externally.
+    auto handleInstanceIntPortConn(ast::InstanceSymbol const &symbol) {
+
+        for (auto& member : symbol.body.members()) {
+            if (member.kind == ast::SymbolKind::Port) {
+                // Create the port declaration netlist node and connect it to
+                // the corresponding local variable declaration.
+                auto& portNode = netlist.addPortDeclaration(member);
+                connectPortInternal(portNode);
+            }
+            else if (member.kind == ast::SymbolKind::MultiPort) {
+              // TODO
+              assert(0 && "unimplemented");
+            }
+            else if (member.kind == ast::SymbolKind::InterfacePort) {
+                auto& ifacePort = member.as<ast::InterfacePortSymbol>();
+                auto ifacePortList = getFlatIfacePorts(symbol, ifacePort);
+
+                // Create port declarations for each flattened member of the
+                // interface.
+                for (auto &flatPort : ifacePortList) {
+                  auto& portNode = netlist.addPortDeclaration(flatPort.port, flatPort.getHierarchicalPath());
+                  // TODO: connect port declaration to internal reference(s) to
+                  // the name.
+                }
+            }
+            else if (member.kind == ast::SymbolKind::Variable ||
+                     member.kind == ast::SymbolKind::Net) {
+              netlist.addVariableDeclaration(member);
+            }
+        }
+    }
+
     /// Variable declaration.
     void handle(const ast::VariableSymbol& symbol) {}
 
@@ -419,76 +651,17 @@ public:
     /// Instance.
     void handle(const ast::InstanceSymbol& symbol) {
         DEBUG_PRINT("Instance {}\n", symbol.name);
+
         if (symbol.name.empty()) {
             // An instance without a name has been excluded from the design.
             // This can happen when the --top option is used and there is an
             // uninstanced module.
             return;
         }
-        // Body members.
-        // Variables first.
-        for (auto& member : symbol.body.members()) {
-            if (member.kind == ast::SymbolKind::Variable || member.kind == ast::SymbolKind::Net) {
-                netlist.addVariableDeclaration(member);
-            }
-        }
-        // Then ports.
-        for (auto& member : symbol.body.members()) {
-            if (member.kind == ast::SymbolKind::Port) {
-                // Create the port declaration netlist node.
-                auto& portNode = netlist.addPortDeclaration(member);
-                // Connected to to the corresponding local variable.
-                connectInstancePort(portNode);
-            }
-        }
-        // Handle connections to the ports of the instance.
-        for (auto* portConnection : symbol.getPortConnections()) {
-            // Collect variable references in the port expression.
-            ast::EvalContext evalCtx(
-                ast::ASTContext(compilation.getRoot(), ast::LookupLocation::max));
-            auto portDirection = portConnection->port.as<ast::PortSymbol>().direction;
-            // The port is effectively the target of an assignment if it is an
-            // input.
-            bool isLeftOperand = portDirection == ast::ArgumentDirection::In ||
-                                 portDirection == ast::ArgumentDirection::InOut;
-            VariableReferenceVisitor visitor(netlist, evalCtx, isLeftOperand);
-            if (portConnection->getExpression() == nullptr) {
-                // Empty port hookup so skip.
-                continue;
-            }
-            portConnection->getExpression()->visit(visitor);
-            // Given a port hookup of the form:
-            //   .foo(expr(x, y))
-            // Where expr() is an expression involving some variables.
-            // Then, add the following edges:
-            // Input port:
-            //   var decl x -> var ref x -> port var ref foo
-            // Output port:
-            //   var decl y <- var ref y <- port var ref foo
-            // InOut port:
-            //   var decl x -> var ref x -> port var ref foo
-            //   var decl y <- var ref y <- port var ref foo
-            for (auto* node : visitor.getVars()) {
-                switch (portDirection) {
-                    case ast::ArgumentDirection::In:
-                        connectDeclToVar(netlist, *node, getSymbolHierPath(node->symbol));
-                        connectVarToDecl(netlist, *node, getSymbolHierPath(portConnection->port));
-                        break;
-                    case ast::ArgumentDirection::Out:
-                        connectDeclToVar(netlist, *node, getSymbolHierPath(portConnection->port));
-                        connectVarToDecl(netlist, *node, getSymbolHierPath(node->symbol));
-                        break;
-                    case ast::ArgumentDirection::InOut:
-                        connectDeclToVar(netlist, *node, getSymbolHierPath(node->symbol));
-                        connectDeclToVar(netlist, *node, getSymbolHierPath(portConnection->port));
-                        connectVarToDecl(netlist, *node, getSymbolHierPath(node->symbol));
-                        connectVarToDecl(netlist, *node, getSymbolHierPath(portConnection->port));
-                        break;
-                    case ast::ArgumentDirection::Ref:
-                        break;
-                }
-            }
-        }
+
+        handleInstanceIntPortConn(symbol);
+        handleInstanceExtPortConn(symbol);
+
         symbol.body.visit(*this);
     }
 
