@@ -231,9 +231,6 @@ private:
 /// A class representing a port declaration.
 class NetlistPortDeclaration : public NetlistNode {
 public:
-    NetlistPortDeclaration(const ast::Symbol& symbol) :
-        NetlistNode(NodeKind::PortDeclaration, symbol) {}
-
     NetlistPortDeclaration(const ast::Symbol& symbol, const std::string& hierarchicalPath) :
         NetlistNode(NodeKind::PortDeclaration, symbol), hierarchicalPath(hierarchicalPath) {}
 
@@ -246,8 +243,8 @@ public:
 /// A class representing a variable declaration.
 class NetlistVariableDeclaration : public NetlistNode {
 public:
-    NetlistVariableDeclaration(const ast::Symbol& symbol) :
-        NetlistNode(NodeKind::VariableDeclaration, symbol) {}
+    NetlistVariableDeclaration(const ast::Symbol& symbol, const std::string& hierarchicalPath) :
+        NetlistNode(NodeKind::VariableDeclaration, symbol) , hierarchicalPath(hierarchicalPath){}
 
     static bool isKind(NodeKind otherKind) { return otherKind == NodeKind::VariableDeclaration; }
 
@@ -333,14 +330,9 @@ public:
 
     /// Add a port declaration node to the netlist.
     NetlistPortDeclaration& addPortDeclaration(const ast::Symbol& symbol) {
-        auto nodePtr = std::make_unique<NetlistPortDeclaration>(symbol);
-        auto& node = nodePtr->as<NetlistPortDeclaration>();
-        symbol.getHierarchicalPath(node.hierarchicalPath);
-        SLANG_ASSERT(lookupPort(nodePtr->hierarchicalPath) == nullptr &&
-                     "Port declaration already exists");
-        nodes.push_back(std::move(nodePtr));
-        DEBUG_PRINT("Add port decl {}\n", node.hierarchicalPath);
-        return node;
+        std::string hierPath;
+        symbol.getHierarchicalPath(hierPath);
+        return addPortDeclaration(symbol, hierPath);
     }
 
     /// Add a port declaration node to the netlist with the given hierarchical
@@ -358,9 +350,15 @@ public:
 
     /// Add a variable declaration node to the netlist.
     NetlistVariableDeclaration& addVariableDeclaration(const ast::Symbol& symbol) {
-        auto nodePtr = std::make_unique<NetlistVariableDeclaration>(symbol);
+        std::string hierPath;
+        symbol.getHierarchicalPath(hierPath);
+        return addVariableDeclaration(symbol, hierPath);
+    }
+
+    /// Add a variable declaration node to the netlist.
+    NetlistVariableDeclaration& addVariableDeclaration(const ast::Symbol& symbol, const std::string & hierarchicalPath) {
+        auto nodePtr = std::make_unique<NetlistVariableDeclaration>(symbol, hierarchicalPath);
         auto& node = nodePtr->as<NetlistVariableDeclaration>();
-        symbol.getHierarchicalPath(node.hierarchicalPath);
         SLANG_ASSERT(lookupVariable(nodePtr->hierarchicalPath) == nullptr &&
                      "Variable declaration already exists");
         nodes.push_back(std::move(nodePtr));
@@ -384,7 +382,7 @@ public:
         auto nodePtr = std::make_unique<NetlistVariableReference>(symbol, expr, leftOperand);
         auto& node = nodePtr->as<NetlistVariableReference>();
         nodes.push_back(std::move(nodePtr));
-        DEBUG_PRINT("Add var ref ", symbol.name);
+        DEBUG_PRINT("Add var ref {}\n", node.hierarchicalPath);
         return node;
     }
 

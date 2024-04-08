@@ -383,6 +383,7 @@ public:
   ast::InterfacePortSymbol const &iface;
   ast::Symbol const &port;
   ast::ArgumentDirection direction;
+  std::ModportSymbol &modport;
 
   FlatInterfacePort(ast::InstanceSymbol const& instance, ast::InterfacePortSymbol const& iface,
                     ast::Symbol const& port) :
@@ -523,7 +524,7 @@ public:
           if (member.kind != ast::SymbolKind::Modport) {
               DEBUG_PRINT("Interface member: instance={} port={} name={} path={}\n", instance.name,
                           ifacePort.name, member.name, path);
-              ports.emplace_back(instance, ifacePort, member);
+              ports.emplace_back(instance, ifacePort, member, modport);
           }
         }
 
@@ -557,6 +558,65 @@ public:
         return ports;
     }
 
+    auto handleInstanceVariables(ast::InstanceSymbol const &symbol) {
+      // Add variable declarations.
+      for (auto& member : symbol.body.members()) {
+          if (member.kind == ast::SymbolKind::Variable || member.kind == ast::SymbolKind::Net) {
+            netlist.addVariableDeclaration(member);
+          }
+      }
+    }
+
+    /// Handle making connections form port members to internal variable
+    /// declarations. This must be called before 'handleInstanceExtPortConn'
+    /// becuase it creates the port declarations in the netlist that are
+    /// connected to externally.
+    auto handleInstanceIntPortConn(ast::InstanceSymbol const &symbol) {
+
+        for (auto& member : symbol.body.members()) {
+            if (member.kind == ast::SymbolKind::Port) {
+                // Create the port declaration netlist node and connect it to
+                // the corresponding local variable declaration.
+                auto& portNode = netlist.addPortDeclaration(member);
+                connectPortInternal(portNode);
+            }
+            else if (member.kind == ast::SymbolKind::MultiPort) {
+              // TODO
+              assert(0 && "unimplemented");
+            }
+            else if (member.kind == ast::SymbolKind::InterfacePort) {
+                //auto& ifacePort = member.as<ast::InterfacePortSymbol>();
+                //auto ifacePortList = getFlatIfacePorts(symbol, ifacePort);
+
+                //// Create port and variable declarations for each flattened member of the
+                //// interface.
+                //for (auto &flatPort : ifacePortList) {
+                //  auto hierPath = flatPort.getHierarchicalPath();
+                //  auto& portDecl = netlist.addPortDeclaration(flatPort.port, hierPath);
+                //  auto& varDecl = netlist.addVariableDeclaration(flatPort.port, hierPath);
+
+                //  // Connect the port declaration to internal reference(s) to
+                //  // the name.
+                //  auto* variableNode = netlist.lookupVariable(hierPath);
+                //  switch (flatPort.direction) {
+                //      case ast::ArgumentDirection::In:
+                //          netlist.addEdge(portDecl, varDecl);
+                //          break;
+                //      case ast::ArgumentDirection::Out:
+                //          netlist.addEdge(varDecl, portDecl);
+                //          break;
+                //      case ast::ArgumentDirection::InOut:
+                //          netlist.addEdge(portDecl, varDecl);
+                //          netlist.addEdge(varDecl, portDecl);
+                //          break;
+                //      case ast::ArgumentDirection::Ref:
+                //          break;
+                //  }
+                //}
+            }
+        }
+    }
+
     // Handle making connections from the port connections to the port
     // declarations of an instance.
     auto handleInstanceExtPortConn(ast::InstanceSymbol const &symbol) {
@@ -588,53 +648,17 @@ public:
                 assert(0 && "unimplemented");
             }
             else if (portConnection->port.kind == ast::SymbolKind::InterfacePort) {
-                auto& ifacePort = portConnection->port.as<ast::InterfacePortSymbol>();
-                auto ifacePortList = getFlatIfacePorts(symbol, ifacePort);
+                //auto& ifacePort = portConnection->port.as<ast::InterfacePortSymbol>();
+                //auto ifacePortList = getFlatIfacePorts(symbol, ifacePort);
 
-                for (auto &flatPort : ifacePortList) {
-                    auto* portNode = netlist.lookupVariable(getSymbolHierPath(flatPort.port));
-                    // TODO
-                    //connectPortExternal(portNode, , flatPort.direction);
-                }
+                //for (auto &flatPort : ifacePortList) {
+                //    auto* portNode = netlist.lookupVariable(getSymbolHierPath(flatPort.port));
+                //    // TODO
+                //    //connectPortExternal(portNode, , flatPort.direction);
+                //}
 
             } else {
               SLANG_UNREACHABLE;
-            }
-        }
-    }
-
-    /// Handle making connections form port members to internal variable
-    /// declarations. This must be called before 'handleInstanceExtPortConn'
-    /// becuase it creates the port declarations in the netlist that are
-    /// connected to externally.
-    auto handleInstanceIntPortConn(ast::InstanceSymbol const &symbol) {
-
-        for (auto& member : symbol.body.members()) {
-            if (member.kind == ast::SymbolKind::Port) {
-                // Create the port declaration netlist node and connect it to
-                // the corresponding local variable declaration.
-                auto& portNode = netlist.addPortDeclaration(member);
-                connectPortInternal(portNode);
-            }
-            else if (member.kind == ast::SymbolKind::MultiPort) {
-              // TODO
-              assert(0 && "unimplemented");
-            }
-            else if (member.kind == ast::SymbolKind::InterfacePort) {
-                auto& ifacePort = member.as<ast::InterfacePortSymbol>();
-                auto ifacePortList = getFlatIfacePorts(symbol, ifacePort);
-
-                // Create port declarations for each flattened member of the
-                // interface.
-                for (auto &flatPort : ifacePortList) {
-                  auto& portNode = netlist.addPortDeclaration(flatPort.port, flatPort.getHierarchicalPath());
-                  // TODO: connect port declaration to internal reference(s) to
-                  // the name.
-                }
-            }
-            else if (member.kind == ast::SymbolKind::Variable ||
-                     member.kind == ast::SymbolKind::Net) {
-              netlist.addVariableDeclaration(member);
             }
         }
     }
@@ -659,6 +683,7 @@ public:
             return;
         }
 
+        handleInstanceVariables(symbol);
         handleInstanceIntPortConn(symbol);
         handleInstanceExtPortConn(symbol);
 
