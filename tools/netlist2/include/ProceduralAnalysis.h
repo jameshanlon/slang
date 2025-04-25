@@ -1,6 +1,7 @@
 #pragma once
 
 #include "slang/analysis/AbstractFlowAnalysis.h"
+#include "slang/ast/statements/ConditionalStatements.h"
 #include "slang/util/BumpAllocator.h"
 #include "slang/util/IntervalMap.h"
 #include "slang/text/FormatBuffer.h"
@@ -16,7 +17,7 @@ concept IsSelectExpr =
             ast::HierarchicalValueExpression, ast::NamedValueExpression>;
 
 // Map assigned ranges to graph nodes.
-using SymbolBitMap = IntervalMap<uint64_t, std::monostate, 3>;
+using SymbolBitMap = IntervalMap<uint64_t, NetlistNode *, 3>;
 using SymbolLSPMap = IntervalMap<uint64_t, const ast::Expression *, 5>;
 
 /// Convert a LSP expression into a string for reporting.
@@ -228,20 +229,61 @@ struct ProceduralAnalysis
     }
 
     if (isLValue) {
+      
+      // Create a variable node.
+      auto &node = graph.addNode(std::make_unique<VariableReference>(symbol, lsp));
+
+      // Add an edge from current state to the variable.
+      auto &currState = getState();
+      if (currState.node) {
+        graph.addEdge(*currState.node, node);
+      }
+
+      // Update visited symbols to slots.
       auto [it, inserted] =
           symbolToSlot.try_emplace(&symbol, (uint32_t)lvalues.size());
+
+      // Update assigned ranges of L-values.
       if (inserted) {
         lvalues.emplace_back(symbol);
         SLANG_ASSERT(lvalues.size() == symbolToSlot.size());
       }
 
+      // Update current state assigned.
       auto index = it->second;
       if (index >= currState.assigned.size()) {
         currState.assigned.resize(index + 1);
       }
 
-      currState.assigned[index].unionWith(*bounds, {}, bitMapAllocator);
+      //currState.assigned[index].unionWith(*bounds, {}, bitMapAllocator);
+      auto &assigned = currState.assigned[index];
+      for (auto assIt = assigned.find(*bounds); assIt != assigned.end();) {
 
+        auto itBounds = assIt.bounds();
+
+        // Existing entry completely contains new bounds.
+        if (itBounds.first <= bounds->first &&
+            itBounds.second >= bounds->second) {
+          // Split entry.
+          assigned.erase(assIt, bitMapAllocator);
+          assigned.insert({itBounds.first, bounds->first}, *assIt, bitMapAllocator);
+          assigned.insert({bounds->second, itBounds.second}, *assIt, bitMapAllocator);
+          break;
+        }
+
+        // New bounds completely contain an existing entry.
+        if (bounds->first < itBounds.first &&
+            bounds->second > itBounds.second) {
+          // Delete entry.
+          assigned.erase(assIt, bitMapAllocator);
+          assIt = assigned.find(*bounds);
+        } else {
+          ++assIt;
+        }
+      }
+      assigned.insert(*bounds, &node.as<VariableReference>(), bitMapAllocator);
+
+      // Update LSP map.
       auto &lspMap = lvalues[index].assigned;
       for (auto lspIt = lspMap.find(*bounds); lspIt != lspMap.end();) {
         // If we find an existing entry that completely contains
@@ -264,8 +306,35 @@ struct ProceduralAnalysis
         }
       }
       lspMap.insert(*bounds, &lsp, lspMapAllocator);
+
     } else {
       rvalues[&symbol].unionWith(*bounds, {}, bitMapAllocator);
+
+      auto &rvalIntervals = rvalues[&symbol];
+      for (auto it = rvalIntervals.find(*bounds); it != rvalIntervals.end();) {
+        auto itBounds = it.bounds();
+
+        // Existing entry completely contains new bounds.
+        if (itBounds.first <= bounds->first &&
+            itBounds.second >= bounds->second) {
+      
+          // Add an edge from the variable to the current state node.
+          auto &currState = getState();
+          SLANG_ASSERT(currState.node);
+          graph.addEdge(**it, *currState.node);
+          return;
+        }
+
+        // New bounds completely contain an existing entry.
+        if (bounds->first < itBounds.first &&
+            bounds->second > itBounds.second) {
+          
+          // Add an edge from the variable to the current state node.
+          auto &currState = getState();
+          SLANG_ASSERT(currState.node);
+          graph.addEdge(**it, *currState.node);
+        }
+      }
     }
   }
 
@@ -313,6 +382,21 @@ struct ProceduralAnalysis
     
     auto &currState = getState();
     auto &node = graph.addNode(std::make_unique<NetlistNode>(NodeKind::Conditional));
+   
+    if (currState.node) {
+      graph.addEdge(*currState.node, node);
+    }
+
+    currState.node = &node;
+
+    visitStmt(stmt);
+  }
+
+  void handle(ast::CaseStatement const &stmt) {
+    fmt::print("CaseStatement\n");
+
+    auto &currState = getState();
+    auto &node = graph.addNode(std::make_unique<NetlistNode>(NodeKind::Case));
    
     if (currState.node) {
       graph.addEdge(*currState.node, node);
