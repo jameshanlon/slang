@@ -281,7 +281,7 @@ struct ProceduralAnalysis
           ++assIt;
         }
       }
-      assigned.insert(*bounds, &node.as<VariableReference>(), bitMapAllocator);
+      assigned.insert(*bounds, &node, bitMapAllocator);
 
       // Update LSP map.
       auto &lspMap = lvalues[index].assigned;
@@ -310,8 +310,15 @@ struct ProceduralAnalysis
     } else {
       rvalues[&symbol].unionWith(*bounds, {}, bitMapAllocator);
 
-      auto &rvalIntervals = rvalues[&symbol];
-      for (auto it = rvalIntervals.find(*bounds); it != rvalIntervals.end();) {
+      if (!symbolToSlot.contains(&symbol)) {
+        // Symbol not assigned in this procedural block.
+        return;
+      }
+
+      auto index = symbolToSlot.at(&symbol);
+      auto &assigned = currState.assigned[index];
+
+      for (auto it = assigned.find(*bounds); it != assigned.end();) {
         auto itBounds = it.bounds();
 
         // Existing entry completely contains new bounds.
