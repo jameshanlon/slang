@@ -44,7 +44,7 @@ public:
     AnalysisContext& context;
 
     /// Constructs a new DataFlowAnalysis object.
-    DataFlowAnalysis(AnalysisContext& context, const Symbol& symbol);
+    DataFlowAnalysis(AnalysisContext& context, const Symbol& symbol, bool reportDiags);
 
     /// Visits all of the symbols that are assigned anywhere in the procedure
     /// and aren't definitely assigned by the end of the procedure.
@@ -55,9 +55,15 @@ public:
     /// associated with them.
     std::span<const Statement* const> getTimedStatements() const { return timedStatements; }
 
-    /// Gets all of the concurrent assertions and procedural checkers in the procedure.
-    std::span<const Statement* const> getAssertionStatements() const {
+    /// Gets all of the concurrent assertions, procedural checkers, and assertion
+    /// instance expressions in the procedure.
+    std::span<std::variant<const Statement*, const Expression*> const> getAssertions() const {
         return concurrentAssertions;
+    }
+
+    /// Gets all of the sampled value system calls in the procedure.
+    std::span<const CallExpression* const> getSampledValueCalls() const {
+        return sampledValueCalls;
     }
 
     /// Determines whether the given symbol is referenced anywhere in
@@ -203,8 +209,11 @@ private:
     // All statements that have timing controls associated with them.
     SmallVector<const Statement*> timedStatements;
 
-    // All concurrent assertions in the procedure.
-    SmallVector<const Statement*> concurrentAssertions;
+    // All concurrent assertions, checkers, and assertion instance expressions in the procedure.
+    SmallVector<std::variant<const Statement*, const Expression*>> concurrentAssertions;
+
+    // Sampled value system calls made in the procedure.
+    SmallVector<const CallExpression*> sampledValueCalls;
 
     [[nodiscard]] auto saveLValueFlag() {
         auto guard = ScopeGuard([this, savedLVal = isLValue] { isLValue = savedLVal; });
@@ -233,7 +242,7 @@ private:
         requires(IsAnyOf<T, TimedStatement, WaitStatement, WaitOrderStatement, WaitForkStatement>)
     void handle(const T& stmt) {
         if constexpr (std::is_same_v<T, TimedStatement>) {
-            bad |= stmt.timing.bad();
+            handleTiming(stmt.timing);
         }
 
         timedStatements.push_back(&stmt);
@@ -241,9 +250,13 @@ private:
     }
 
     void handle(const AssignmentExpression& expr);
+    void handle(const CallExpression& expr);
     void handle(const ExpressionStatement& stmt);
     void handle(const ConcurrentAssertionStatement& stmt);
     void handle(const ProceduralCheckerStatement& stmt);
+    void handle(const AssertionInstanceExpression& expr);
+    void handle(const EventTriggerStatement& stmt);
+    void handleTiming(const TimingControl& timing);
 
     // **** State Management ****
 

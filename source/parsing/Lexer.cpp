@@ -883,7 +883,7 @@ Token Lexer::lexDollarSign() {
     if (kind != TokenKind::Unknown)
         return create(kind);
 
-    return create(TokenKind::SystemIdentifier);
+    return create(TokenKind::SystemIdentifier, parseKnownSystemName(lexeme()));
 }
 
 Token Lexer::lexDirective() {
@@ -1342,9 +1342,8 @@ bool Lexer::tryApplyCommentHandler() {
         case CommentHandler::LintRestore:
             sourceManager.addDiagnosticDirective(loc(), "__pop__", DiagnosticSeverity::Ignored);
             return false;
-        default:
-            SLANG_UNREACHABLE;
     }
+    SLANG_UNREACHABLE;
 }
 
 bool Lexer::scanUTF8Char(bool alreadyErrored) {
@@ -1548,8 +1547,6 @@ void Lexer::scanEncodedText(ProtectEncoding encoding, uint32_t expectedBytes, bo
                 advance();
                 byteCount++;
                 break;
-            default:
-                SLANG_UNREACHABLE;
         }
     }
 }

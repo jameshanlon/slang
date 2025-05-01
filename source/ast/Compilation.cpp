@@ -137,7 +137,8 @@ Compilation::Compilation(const Bag& options, const SourceLibrary* defaultLib) :
     root = std::make_unique<RootSymbol>(*this);
 
     // Copy in all built-in system tasks, functions, and methods.
-    subroutineMap = bi.subroutineMap;
+    systemSubroutines = bi.systemSubroutines;
+    subroutineNameMap = bi.subroutineNameMap;
     methodMap = bi.methodMap;
 
     // Register the built-in std package.
@@ -231,6 +232,8 @@ void Compilation::addSyntaxTree(std::shared_ptr<SyntaxTree> tree) {
                 break;
         }
 
+        result.cellDefine = meta.cellDefine;
+
         syntaxMetadata[n] = result;
     }
 
@@ -308,7 +311,7 @@ const RootSymbol& Compilation::getRoot(bool skipDefParamsAndBinds) {
 
     // If any top-level parameter overrides were provided, parse them now.
     flat_hash_map<std::string_view, const ConstantValue*> cliOverrides;
-    parseParamOverrides(cliOverrides);
+    parseParamOverrides(skipDefParamsAndBinds, cliOverrides);
 
     // If there are defparams we need to fully resolve their values up front before
     // we start elaborating any instances.
@@ -517,7 +520,6 @@ const RootSymbol& Compilation::getRoot(bool skipDefParamsAndBinds) {
 
     // If we have any cli param overrides we should apply them to
     // each top-level instance.
-    // TODO: generalize these to full hierarchical paths
     if (!cliOverrides.empty()) {
         for (auto [result, _] : topDefs) {
             auto& def = result.definition->as<DefinitionSymbol>();
@@ -819,7 +821,7 @@ void Compilation::createDefinition(const Scope& scope, LookupLocation location,
     auto def = definitionMemory
                    .emplace_back(std::make_unique<DefinitionSymbol>(
                        scope, location, syntax, *metadata.defaultNetType, metadata.unconnectedDrive,
-                       metadata.timeScale, metadata.tree))
+                       metadata.cellDefine, metadata.timeScale, metadata.tree))
                    .get();
     definitionFromSyntax[&syntax].push_back(def);
 
@@ -910,7 +912,6 @@ void Compilation::insertDefinition(Symbol& symbol, const Scope& scope) {
     }
 
     if (isRoot) {
-        // TODO: how do extern modules work with libraries?
         if (auto externDef = getExternDefinition(symbol.name, scope)) {
             auto syntax = symbol.getSyntax();
             SLANG_ASSERT(syntax);
@@ -1031,20 +1032,30 @@ void Compilation::addGateType(const PrimitiveSymbol& prim) {
 
 void Compilation::addSystemSubroutine(const std::shared_ptr<SystemSubroutine>& subroutine) {
     SLANG_ASSERT(!isFrozen());
-    subroutineMap.emplace(subroutine->name, subroutine);
+    SLANG_ASSERT(!subroutine->name.empty());
+    SLANG_ASSERT(subroutine->knownNameId == KnownSystemName::Unknown);
+    subroutineNameMap.emplace(subroutine->name, subroutine);
 }
 
 void Compilation::addSystemMethod(SymbolKind typeKind,
                                   const std::shared_ptr<SystemSubroutine>& method) {
     SLANG_ASSERT(!isFrozen());
+    SLANG_ASSERT(!method->name.empty());
+    SLANG_ASSERT(method->knownNameId == KnownSystemName::Unknown);
     methodMap.emplace(std::make_tuple(std::string_view(method->name), typeKind), method);
 }
 
 const SystemSubroutine* Compilation::getSystemSubroutine(std::string_view name) const {
-    auto it = subroutineMap.find(name);
-    if (it == subroutineMap.end())
+    auto it = subroutineNameMap.find(name);
+    if (it == subroutineNameMap.end())
         return nullptr;
     return it->second.get();
+}
+
+const SystemSubroutine* Compilation::getSystemSubroutine(
+    parsing::KnownSystemName knownNameId) const {
+
+    return systemSubroutines[(size_t)knownNameId].get();
 }
 
 const SystemSubroutine* Compilation::getSystemMethod(SymbolKind typeKind,
@@ -1800,19 +1811,15 @@ const Type& Compilation::getTypeRefType() const {
     return getType(SyntaxKind::TypeReference);
 }
 
-Scope::DeferredMemberData& Compilation::getOrAddDeferredData(Scope::DeferredMemberIndex& index) {
-    SLANG_ASSERT(!isFrozen());
-    if (index == Scope::DeferredMemberIndex::Invalid)
-        index = deferredData.emplace();
-    return deferredData[index];
-}
-
 void Compilation::parseParamOverrides(
-    flat_hash_map<std::string_view, const ConstantValue*>& results) {
+    bool skipDefParams, flat_hash_map<std::string_view, const ConstantValue*>& results) {
+
     if (options.paramOverrides.empty())
         return;
 
     ScriptSession session;
+    session.copyPackagesFrom(*this);
+
     for (auto& opt : options.paramOverrides) {
         // Strings must be of the form <name>=<value>
         size_t index = opt.find('=');
@@ -1822,18 +1829,34 @@ void Compilation::parseParamOverrides(
             Diagnostics localDiags;
             std::string_view optView = opt;
             std::string_view name = optView.substr(0, index);
-            if (tryParseName(name, localDiags).kind == SyntaxKind::IdentifierName &&
-                localDiags.empty()) {
 
-                // The name is good, evaluate the value string. Using the ScriptSession
-                // here is a little bit lazy but oh well, this executes almost never
-                // compared to everything else during compilation.
-                std::string_view value = optView.substr(index + 1);
-                ConstantValue cv = session.eval(value);
-                if (cv) {
-                    // Success, store in the map so we can apply the value later.
-                    results.emplace(name, allocConstant(std::move(cv)));
-                    continue;
+            auto& nameSyntax = tryParseName(name, localDiags);
+            if (localDiags.empty()) {
+                if (nameSyntax.kind == SyntaxKind::IdentifierName) {
+                    // The name is good, evaluate the value string. Using the ScriptSession
+                    // here is a little bit lazy but oh well, this executes almost never
+                    // compared to everything else during compilation.
+                    std::string_view value = optView.substr(index + 1);
+                    ConstantValue cv = session.eval(value);
+                    if (cv) {
+                        // Success, store in the map so we can apply the value later.
+                        results.emplace(name, allocConstant(std::move(cv)));
+                        continue;
+                    }
+                }
+                else {
+                    // Not a simple identifier, so treat this as a full defparam.
+                    if (skipDefParams)
+                        continue;
+
+                    SLANG_ASSERT(sourceManager);
+                    auto tree = SyntaxTree::fromText(fmt::format("defparam {};", opt),
+                                                     *sourceManager, "<command-line>"sv);
+
+                    if (tree->diagnostics().empty() && tree->root().kind == SyntaxKind::DefParam) {
+                        addSyntaxTree(std::move(tree));
+                        continue;
+                    }
                 }
             }
         }

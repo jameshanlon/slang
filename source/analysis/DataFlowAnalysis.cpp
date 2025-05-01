@@ -7,13 +7,18 @@
 //------------------------------------------------------------------------------
 #include "slang/analysis/DataFlowAnalysis.h"
 
+#include "NonProceduralExprVisitor.h"
+
 #include "slang/analysis/ClockInference.h"
 
 namespace slang::analysis {
 
-DataFlowAnalysis::DataFlowAnalysis(AnalysisContext& context, const Symbol& symbol) :
-    AbstractFlowAnalysis(symbol, context.manager->getOptions().flags), context(context),
-    bitMapAllocator(context.alloc), lspMapAllocator(context.alloc), lspVisitor(*this) {
+DataFlowAnalysis::DataFlowAnalysis(AnalysisContext& context, const Symbol& symbol,
+                                   bool reportDiags) :
+    AbstractFlowAnalysis(symbol, context.manager->getOptions(),
+                         reportDiags ? &context.diagnostics : nullptr),
+    context(context), bitMapAllocator(context.alloc), lspMapAllocator(context.alloc),
+    lspVisitor(*this) {
 }
 
 bool DataFlowAnalysis::isReferenced(const ValueSymbol& symbol, const Expression& lsp) const {
@@ -112,6 +117,18 @@ void DataFlowAnalysis::handle(const AssignmentExpression& expr) {
 
     if (!expr.isLValueArg())
         visit(expr.right());
+
+    if (expr.timingControl)
+        handleTiming(*expr.timingControl);
+}
+
+void DataFlowAnalysis::handle(const CallExpression& expr) {
+    visitExpr(expr);
+
+    // If this is a call to a sampled value function, keep track of
+    // it so that we can later verify that it has a clocking event.
+    if (ClockInference::isSampledValueFuncCall(expr))
+        sampledValueCalls.push_back(&expr);
 }
 
 void DataFlowAnalysis::handle(const ExpressionStatement& stmt) {
@@ -134,6 +151,29 @@ void DataFlowAnalysis::handle(const ConcurrentAssertionStatement& stmt) {
 void DataFlowAnalysis::handle(const ProceduralCheckerStatement& stmt) {
     concurrentAssertions.push_back(&stmt);
     visitStmt(stmt);
+}
+
+void DataFlowAnalysis::handle(const AssertionInstanceExpression& expr) {
+    concurrentAssertions.push_back(&expr);
+    visitExpr(expr);
+}
+
+void DataFlowAnalysis::handle(const EventTriggerStatement& stmt) {
+    if (stmt.timing)
+        handleTiming(*stmt.timing);
+    visitStmt(stmt);
+}
+
+void DataFlowAnalysis::handleTiming(const TimingControl& timing) {
+    if (timing.bad()) {
+        bad = true;
+        return;
+    }
+
+    // The timing expressions don't contribute to data flow but we still
+    // want to analyze them for various correctness checks.
+    NonProceduralExprVisitor visitor(context, rootSymbol);
+    timing.visit(visitor);
 }
 
 void DataFlowAnalysis::joinState(DataFlowState& result, const DataFlowState& other) {

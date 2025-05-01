@@ -7,6 +7,8 @@
 //------------------------------------------------------------------------------
 #include "slang/analysis/AnalyzedAssertion.h"
 
+#include "NonProceduralExprVisitor.h"
+
 #include "slang/analysis/AnalysisManager.h"
 #include "slang/analysis/ClockInference.h"
 #include "slang/ast/ASTVisitor.h"
@@ -62,7 +64,7 @@ static bool isSameClock(const TimingControl& left, const TimingControl& right) {
 }
 
 enum class VisitFlags { None = 0, RequireSequence = 1, InClockingBlock = 2 };
-SLANG_BITMASK(VisitFlags, InClockingBlock);
+SLANG_BITMASK(VisitFlags, InClockingBlock)
 
 // This visitor implements clock flow and resolution for assertion expressions.
 // The requirements for this are scattered around the LRM. Some important parts are:
@@ -74,14 +76,16 @@ struct ClockVisitor {
     using VF = VisitFlags;
     using Clock = const TimingControl*;
     using ClockSet = SmallVector<Clock, 2>;
+    using KnownSystemName = parsing::KnownSystemName;
 
     struct VisitResult {
         ClockSet clocks;
+        Clock endClock = nullptr;
         bool isMulticlockedSeq = false;
 
         VisitResult() = default;
-        VisitResult(Clock clock, bool isMulticlockedSeq) :
-            clocks{clock}, isMulticlockedSeq(isMulticlockedSeq) {}
+        VisitResult(Clock clock, bool isMulticlockedSeq, Clock endClock) :
+            clocks{clock}, endClock(endClock), isMulticlockedSeq(isMulticlockedSeq) {}
 
         static VisitResult unionWith(const VisitResult& left, const VisitResult& right) {
             VisitResult result;
@@ -92,19 +96,69 @@ struct ClockVisitor {
         }
     };
 
+    struct SeqExprVisitor {
+        ClockVisitor& parent;
+        Clock outerClock;
+        bitmask<VF> flags;
+        Clock lastEndClock = nullptr;
+
+        SeqExprVisitor(ClockVisitor& parent, Clock outerClock, bitmask<VF> flags) :
+            parent(parent), outerClock(outerClock), flags(flags) {}
+
+        template<typename T>
+        void visit(const T& expr) {
+            if constexpr (std::is_same_v<T, AssertionInstanceExpression>) {
+                auto result = parent.visit(expr, outerClock, flags);
+                if (!result.clocks.empty()) {
+                    lastEndClock = result.endClock == nullptr ? result.clocks.back()
+                                                              : result.endClock;
+                }
+            }
+
+            if constexpr (HasVisitExprs<T, SeqExprVisitor>) {
+                expr.visitExprs(*this);
+                if constexpr (std::is_same_v<T, CallExpression>) {
+                    if (!parent.globalFutureSampledValueCall &&
+                        SemanticFacts::isGlobalFutureSampledValueFunc(expr.getKnownSystemName())) {
+                        parent.globalFutureSampledValueCall = &expr;
+                        parent.checkGFSVC();
+                    }
+
+                    if (lastEndClock && outerClock) {
+                        // The end clock of a sequence used with .triggered or .matched
+                        // must match the outer clock.
+                        if (!isSameClock(*outerClock, *lastEndClock)) {
+                            parent.bad = true;
+                            auto& diag = parent.context.addDiag(parent.parentSymbol,
+                                                                diag::SeqMethodEndClock,
+                                                                expr.sourceRange);
+                            diag << expr.getSubroutineName();
+                            diag.addNote(diag::NoteClockHere, outerClock->sourceRange);
+                            diag.addNote(diag::NoteClockHere, lastEndClock->sourceRange);
+                        }
+                        lastEndClock = nullptr;
+                    }
+                }
+            }
+        }
+    };
+
     AnalysisContext& context;
-    const AnalyzedProcedure& procedure;
+    const AnalyzedProcedure* procedure;
     const Symbol& parentSymbol;
     SmallVector<ClockInference::ExpansionInstance> expansionStack;
+    const CallExpression* globalFutureSampledValueCall = nullptr;
     bool hasInferredClockCall = false;
+    bool hasMatchItems = false;
     bool bad = false;
 
-    ClockVisitor(AnalysisContext& context, const AnalyzedProcedure& procedure) :
-        context(context), procedure(procedure), parentSymbol(*procedure.analyzedSymbol) {
+    ClockVisitor(AnalysisContext& context, const AnalyzedProcedure* procedure,
+                 const Symbol& parentSymbol) :
+        context(context), procedure(procedure), parentSymbol(parentSymbol) {
 
         // If we're in a checker with an inferred clock arg, we will just assume
         // that we might have an inferred clock call somewhere.
-        auto scope = procedure.analyzedSymbol->getParentScope();
+        auto scope = parentSymbol.getParentScope();
         if (scope && scope->asSymbol().kind == SymbolKind::CheckerInstanceBody)
             hasInferredClockCall = true;
     }
@@ -114,63 +168,84 @@ struct ClockVisitor {
         return {};
     }
 
-    VisitResult visit(const SimpleAssertionExpr& expr, Clock outerClock, bitmask<VF> flags) {
-        if (expr.expr.kind == ExpressionKind::AssertionInstance) {
-            auto& aie = expr.expr.as<AssertionInstanceExpression>();
-            if (aie.isRecursiveProperty)
-                return {};
+    VisitResult visit(const AssertionInstanceExpression& expr, Clock outerClock,
+                      bitmask<VF> flags) {
+        if (expr.isRecursiveProperty)
+            return {};
 
-            const bool inClockingBlock = flags.has(VF::InClockingBlock);
+        const bool inClockingBlock = flags.has(VF::InClockingBlock);
 
-            if (aie.type->isSequenceType())
-                flags |= VF::RequireSequence;
+        if (expr.type->isSequenceType())
+            flags |= VF::RequireSequence;
 
-            auto flowClock = outerClock;
-            auto scope = aie.symbol.getParentScope();
-            if (scope && scope->asSymbol().kind == SymbolKind::ClockingBlock) {
-                // Outer clock comes from the clocking block.
-                flowClock = &scope->asSymbol().as<ClockingBlockSymbol>().getEvent();
-                flags |= VF::InClockingBlock;
-            }
+        auto flowClock = outerClock;
+        auto scope = expr.symbol.getParentScope();
+        if (scope && scope->asSymbol().kind == SymbolKind::ClockingBlock) {
+            // Outer clock comes from the clocking block.
+            flowClock = &scope->asSymbol().as<ClockingBlockSymbol>().getEvent();
+            flags |= VF::InClockingBlock;
+        }
 
-            SLANG_ASSERT(expr.syntax);
-            expansionStack.push_back({expr, outerClock});
-            hasInferredClockCall |= expansionStack.back().hasInferredClockArg;
+        expansionStack.push_back({expr, outerClock});
+        hasInferredClockCall |= expansionStack.back().hasInferredClockArg;
 
-            auto result = aie.body.visit(*this, flowClock, flags);
-            expansionStack.pop_back();
+        auto result = expr.body.visit(*this, flowClock, flags);
+        expansionStack.pop_back();
 
-            // Named sequences and properties instantiated from within a clocking block
-            // must be singly clocked and share the same clock as the clocking block.
-            if (!bad && inClockingBlock && outerClock) {
-                if (result.isMulticlockedSeq || result.clocks.size() != 1 ||
-                    !isSameClock(*outerClock, *result.clocks[0])) {
+        // Named sequences and properties instantiated from within a clocking block
+        // must be singly clocked and share the same clock as the clocking block.
+        if (!bad && inClockingBlock && outerClock) {
+            if (result.isMulticlockedSeq || result.clocks.size() != 1 ||
+                !isSameClock(*outerClock, *result.clocks[0])) {
 
-                    bad = true;
-                    if (result.isMulticlockedSeq || result.clocks.size() != 1) {
-                        context.addDiag(parentSymbol, diag::MulticlockedInClockingBlock,
-                                        expr.syntax->sourceRange())
-                            << aie.symbol.name;
-                    }
-                    else {
-                        auto& diag = context.addDiag(parentSymbol,
-                                                     diag::DifferentClockInClockingBlock,
-                                                     expr.syntax->sourceRange());
-                        diag << aie.symbol.name;
-                        diag.addNote(diag::NoteClockHere, outerClock->sourceRange);
-                        diag.addNote(diag::NoteClockHere, result.clocks[0]->sourceRange);
-                    }
+                bad = true;
+                if (result.isMulticlockedSeq || result.clocks.size() != 1) {
+                    context.addDiag(parentSymbol, diag::MulticlockedInClockingBlock,
+                                    expr.sourceRange)
+                        << expr.symbol.name;
+                }
+                else {
+                    auto& diag = context.addDiag(parentSymbol, diag::DifferentClockInClockingBlock,
+                                                 expr.sourceRange);
+                    diag << expr.symbol.name;
+                    diag.addNote(diag::NoteClockHere, outerClock->sourceRange);
+                    diag.addNote(diag::NoteClockHere, result.clocks[0]->sourceRange);
                 }
             }
-
-            return result;
         }
+
+        return result;
+    }
+
+    VisitResult visit(const SimpleAssertionExpr& expr, Clock outerClock, bitmask<VF> flags) {
+        // If this is a direct sequence instance then we can return its result directly.
+        if (expr.expr.kind == ExpressionKind::AssertionInstance)
+            return visit(expr.expr.as<AssertionInstanceExpression>(), outerClock, flags);
+
+        // If this is a call to sequence method we don't require an outer clock,
+        // so check for that case explicitly.
+        if (expr.expr.kind == ExpressionKind::Call) {
+            auto& call = expr.expr.as<CallExpression>();
+            if (auto ksn = call.getKnownSystemName();
+                ksn == KnownSystemName::Triggered || ksn == KnownSystemName::Matched) {
+                auto args = call.arguments();
+                if (!args.empty() && args[0]->kind == ExpressionKind::AssertionInstance)
+                    return visit(args[0]->as<AssertionInstanceExpression>(), outerClock, flags);
+            }
+        }
+
+        // Visit the expression to find nested sequence instantiations due to
+        // calls to .triggered and .matched. We will still require an outer clock
+        // in the inheritedClock call below.
+        SeqExprVisitor exprVisitor(*this, outerClock, flags);
+        expr.expr.visit(exprVisitor);
 
         return inheritedClock(expr, outerClock, flags | VF::RequireSequence);
     }
 
     VisitResult visit(const SequenceConcatExpr& expr, Clock outerClock, bitmask<VF> flags) {
         Clock firstClock = nullptr;
+        Clock endClock = nullptr;
         const AssertionExpr* lastExpr = nullptr;
         bool lastWasMulticlocked = false;
         bool isMulticlockedSeq = false;
@@ -178,6 +253,7 @@ struct ClockVisitor {
         for (auto& elem : expr.elements) {
             auto result = elem.sequence->visit(*this, outerClock, flags | VF::RequireSequence);
             if (!result.clocks.empty()) {
+                endClock = result.endClock == nullptr ? result.clocks.back() : result.endClock;
                 if (!firstClock) {
                     firstClock = result.clocks[0];
                 }
@@ -201,10 +277,15 @@ struct ClockVisitor {
         if (!firstClock)
             return {};
 
-        return {firstClock, isMulticlockedSeq};
+        return {firstClock, isMulticlockedSeq, endClock};
     }
 
     VisitResult visit(const SequenceWithMatchExpr& expr, Clock outerClock, bitmask<VF> flags) {
+        if (!hasMatchItems) {
+            hasMatchItems = true;
+            checkGFSVC();
+        }
+
         return expr.expr.visit(*this, outerClock, flags | VF::RequireSequence);
     }
 
@@ -223,12 +304,20 @@ struct ClockVisitor {
         auto clocking = &expr.clocking;
         if (hasInferredClockCall) {
             auto result = ClockInference::expand(context, parentSymbol, *clocking, expansionStack,
-                                                 &procedure);
+                                                 procedure);
             clocking = result.clock;
             if (result.diag) {
                 bad = true;
                 addExpansionNotes(*result.diag);
             }
+        }
+
+        if (clocking) {
+            // Our current clock doesn't flow into the event expression,
+            // so check it separately for explicit clocking of sequence instances
+            // and calls to sampled value functions.
+            NonProceduralExprVisitor visitor(context, parentSymbol);
+            clocking->visit(visitor);
         }
 
         return expr.expr.visit(*this, clocking, flags);
@@ -298,9 +387,8 @@ struct ClockVisitor {
                 expr.right.visit(*this, outerClock, flags);
                 return lresult;
             }
-            default:
-                SLANG_UNREACHABLE;
         }
+        SLANG_UNREACHABLE;
     }
 
     VisitResult visit(const ConditionalAssertionExpr& expr, Clock outerClock, bitmask<VF> flags) {
@@ -324,7 +412,23 @@ struct ClockVisitor {
     }
 
     VisitResult visit(const DisableIffAssertionExpr& expr, Clock outerClock, bitmask<VF> flags) {
+        // Our current clock doesn't flow into the disable iff condition,
+        // so check it separately for explicit clocking of sequence instances
+        // and calls to sampled value functions.
+        NonProceduralExprVisitor visitor(context, parentSymbol);
+        expr.condition.visit(visitor);
+
         return expr.expr.visit(*this, outerClock, flags);
+    }
+
+    void checkGFSVC() {
+        if (!bad && globalFutureSampledValueCall && hasMatchItems) {
+            bad = true;
+
+            auto& diag = context.addDiag(parentSymbol, diag::GFSVMatchItems,
+                                         globalFutureSampledValueCall->sourceRange);
+            diag << globalFutureSampledValueCall->getSubroutineName();
+        }
     }
 
 private:
@@ -340,7 +444,7 @@ private:
                 SourceRange range;
                 SLANG_ASSERT(expr.syntax);
                 if (!expansionStack.empty())
-                    range = expansionStack.front().expr->syntax->sourceRange();
+                    range = expansionStack.front().expr->sourceRange;
                 else
                     range = expr.syntax->sourceRange();
 
@@ -348,16 +452,14 @@ private:
                 diag << exprKindStr(flags);
 
                 if (!expansionStack.empty()) {
-                    for (size_t i = 1; i < expansionStack.size(); i++) {
-                        diag.addNote(diag::NoteRequiredHere,
-                                     expansionStack[i].expr->syntax->sourceRange());
-                    }
+                    for (size_t i = 1; i < expansionStack.size(); i++)
+                        diag.addNote(diag::NoteRequiredHere, expansionStack[i].expr->sourceRange);
                     diag.addNote(diag::NoteRequiredHere, expr.syntax->sourceRange());
                 }
             }
             return {};
         }
-        return {outerClock, false};
+        return {outerClock, false, nullptr};
     }
 
     void badMulticlockedSeq(const AssertionExpr& left, const AssertionExpr& right,
@@ -392,21 +494,20 @@ private:
     void addExpansionNotes(Diagnostic& diag) {
         for (auto it = expansionStack.rbegin(); it != expansionStack.rend(); it++) {
             auto& expr = *it->expr;
-            if (expr.syntax)
-                diag.addNote(diag::NoteExpandedHere, expr.syntax->sourceRange());
+            diag.addNote(diag::NoteExpandedHere, expr.sourceRange);
         }
     }
 };
 
 AnalyzedAssertion::AnalyzedAssertion(AnalysisContext& context, const TimingControl* contextualClock,
                                      const AnalyzedProcedure& procedure, const Statement& stmt,
-                                     const Symbol* checkerInstance) : analyzedStatement(&stmt) {
+                                     const Symbol* checkerInstance) {
     if (checkerInstance) {
         checkerScope = &context.manager->analyzeScopeBlocking(
             checkerInstance->as<CheckerInstanceSymbol>().body, &procedure);
     }
     else {
-        ClockVisitor visitor(context, procedure);
+        ClockVisitor visitor(context, &procedure, *procedure.analyzedSymbol);
 
         auto& propSpec = stmt.as<ConcurrentAssertionStatement>().propertySpec;
         auto result = propSpec.visit(visitor, contextualClock, VisitFlags::None);
@@ -426,6 +527,13 @@ AnalyzedAssertion::AnalyzedAssertion(AnalysisContext& context, const TimingContr
             }
         }
     }
+}
+
+AnalyzedAssertion::AnalyzedAssertion(AnalysisContext& context, const TimingControl* contextualClock,
+                                     const AnalyzedProcedure* procedure,
+                                     const ast::Symbol& parentSymbol, const Expression& expr) {
+    ClockVisitor visitor(context, procedure, parentSymbol);
+    visitor.visit(expr.as<AssertionInstanceExpression>(), contextualClock, VisitFlags::None);
 }
 
 } // namespace slang::analysis

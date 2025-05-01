@@ -19,7 +19,6 @@
 #include "slang/util/BumpAllocator.h"
 #include "slang/util/IntervalMap.h"
 #include "slang/util/LanguageVersion.h"
-#include "slang/util/SafeIndexedVector.h"
 
 namespace slang::syntax {
 class SyntaxTree;
@@ -158,7 +157,7 @@ struct SLANG_EXPORT CompilationOptions {
 
     /// The maximum number of steps to allow when evaluating a constant expressions,
     /// to detect infinite loops.
-    uint32_t maxConstexprSteps = 100000;
+    uint32_t maxConstexprSteps = 1000000;
 
     /// The maximum number of frames in a callstack to display in diagnostics
     /// before abbreviating them.
@@ -310,8 +309,10 @@ public:
     /// so will result in an exception.
     const RootSymbol& getRoot();
 
-    /// Gets the root of the design if it's been finalized, or nullptr if it hasn't.
-    const RootSymbol* tryGetRoot() const { return root.get(); }
+    /// Gets the root of the design without attempting to finalize it.
+    /// This means that (if the design has not been finalized previously) things like
+    /// defparams will not be resolved, root instances will not have been created, etc.
+    const RootSymbol& getRootNoFinalize() const { return *root; }
 
     /// Indicates whether the design has been compiled and can no longer accept modifications.
     bool isFinalized() const { return finalized; }
@@ -462,6 +463,10 @@ public:
     /// Gets a system subroutine with the given name, or nullptr if there is no such subroutine
     /// registered.
     const SystemSubroutine* getSystemSubroutine(std::string_view name) const;
+
+    /// Gets a system subroutine with the given KnownSystemName, or nullptr if there is no such
+    /// subroutine registered.
+    const SystemSubroutine* getSystemSubroutine(parsing::KnownSystemName knownNameId) const;
 
     /// Gets a system method for the specified type with the given name, or nullptr if there
     /// is no such method registered.
@@ -794,9 +799,6 @@ private:
         bool cannotCache = false;
     };
 
-    // These functions are called by Scopes to create and track various members.
-    Scope::DeferredMemberData& getOrAddDeferredData(Scope::DeferredMemberIndex& index);
-
     bool doTypoCorrection() const { return typoCorrections < options.typoCorrectionLimit; }
     void didTypoCorrection() { typoCorrections++; }
 
@@ -807,7 +809,8 @@ private:
     const RootSymbol& getRoot(bool skipDefParamsAndBinds);
     void elaborate();
     void insertDefinition(Symbol& symbol, const Scope& scope);
-    void parseParamOverrides(flat_hash_map<std::string_view, const ConstantValue*>& results);
+    void parseParamOverrides(bool skipDefParams,
+                             flat_hash_map<std::string_view, const ConstantValue*>& results);
     void checkDPIMethods(std::span<const SubroutineSymbol* const> dpiImports);
     void checkExternIfaceMethods(std::span<const MethodPrototypeSymbol* const> protos);
     void checkModportExports(
@@ -856,9 +859,6 @@ private:
     Type* errorType;
     NetType* wireNetType;
 
-    // Sideband data for scopes that have deferred members.
-    SafeIndexedVector<Scope::DeferredMemberData, Scope::DeferredMemberIndex> deferredData;
-
     // A map of syntax nodes that have been referenced in the AST.
     // The value indicates whether the node has been used as an lvalue vs non-lvalue,
     // for things like variables and nets.
@@ -886,8 +886,8 @@ private:
     // which is why they can't share the definitions name table.
     flat_hash_map<std::string_view, const PackageSymbol*> packageMap;
 
-    // The name map for system subroutines.
-    flat_hash_map<std::string_view, std::shared_ptr<SystemSubroutine>> subroutineMap;
+    // A list of known system subroutines, indexed via KnownSystemName values.
+    std::vector<std::shared_ptr<SystemSubroutine>> systemSubroutines;
 
     // The name map for system methods.
     flat_hash_map<std::tuple<std::string_view, SymbolKind>, std::shared_ptr<SystemSubroutine>>
@@ -904,6 +904,7 @@ private:
         const NetType* defaultNetType = nullptr;
         std::optional<TimeScale> timeScale;
         UnconnectedDrive unconnectedDrive = UnconnectedDrive::None;
+        bool cellDefine = false;
     };
 
     // Map from syntax nodes to parse-time metadata about them.
@@ -935,7 +936,7 @@ private:
         outOfBlockDecls;
 
     std::unique_ptr<RootSymbol> root;
-    const SourceManager* sourceManager = nullptr;
+    SourceManager* sourceManager = nullptr;
     size_t numErrors = 0; // total number of errors inserted into the diagMap
     bool finalized = false;
     bool finalizing = false; // to prevent reentrant calls to getRoot()
@@ -1040,6 +1041,11 @@ private:
     // A map of net aliases to check for duplicates. For any given alias the key is
     // whichever symbol has the lower address in memory.
     flat_hash_map<const Symbol*, AliasIntervalMap> netAliases;
+
+    // The name map for system subroutines.
+    // This is down here because it should really only be used for custom user-defined
+    // system subroutines via the API.
+    flat_hash_map<std::string_view, std::shared_ptr<SystemSubroutine>> subroutineNameMap;
 
     // The built-in std package.
     const PackageSymbol* stdPkg = nullptr;

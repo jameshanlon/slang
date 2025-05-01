@@ -297,14 +297,15 @@ endmodule
     AnalysisManager analysisManager;
 
     auto [diags, design] = analyze(text, compilation, analysisManager);
-    REQUIRE(diags.size() == 7);
-    CHECK(diags[0].code == diag::AssertionNoClock);
+    REQUIRE(diags.size() == 8);
+    CHECK(diags[0].code == diag::SampledValueFuncClock);
     CHECK(diags[1].code == diag::AssertionNoClock);
-    CHECK(diags[2].code == diag::NoUniqueClock);
-    CHECK(diags[3].code == diag::AssertionNoClock);
+    CHECK(diags[2].code == diag::AssertionNoClock);
+    CHECK(diags[3].code == diag::NoUniqueClock);
     CHECK(diags[4].code == diag::AssertionNoClock);
     CHECK(diags[5].code == diag::AssertionNoClock);
     CHECK(diags[6].code == diag::AssertionNoClock);
+    CHECK(diags[7].code == diag::AssertionNoClock);
 }
 
 TEST_CASE("Assertions clock resolution rules with clocking blocks") {
@@ -693,8 +694,9 @@ endmodule // c10
     AnalysisManager analysisManager;
 
     auto [diags, design] = analyze(text, compilation, analysisManager);
-    REQUIRE(diags.size() == 1);
-    CHECK(diags[0].code == diag::AssertionNoClock);
+    REQUIRE(diags.size() == 2);
+    CHECK(diags[0].code == diag::SampledValueFuncClock);
+    CHECK(diags[1].code == diag::AssertionNoClock);
 }
 
 TEST_CASE("Clock resolution tests 6") {
@@ -1044,7 +1046,7 @@ endmodule
 
 module mc_07;
    bit clk;
-   clocking PCLK @(posedge clk);
+   default clocking PCLK @(posedge clk);
    endclocking
 
    logic a, b;
@@ -1104,7 +1106,8 @@ endmodule
     AnalysisManager analysisManager;
 
     auto [diags, design] = analyze(text, compilation, analysisManager);
-    CHECK_DIAGS_EMPTY;
+    REQUIRE(diags.size() == 1);
+    CHECK(diags[0].code == diag::SampledValueFuncClock);
 }
 
 TEST_CASE("Clock resolution tests 12") {
@@ -1165,11 +1168,11 @@ module mc_14;
 
     // Define assertions using multi-clocked sequences
     property prop1;
-        @(posedge clk1) disable iff(!$rose(clk1)) seq1 |-> seq2;
+        @(posedge clk1) disable iff(!$rose(clk1, @(posedge clk1))) seq1 |-> seq2;
     endproperty
 
     property prop2;
-        @(posedge clk2) disable iff(!$rose(clk2)) seq2 |-> seq1;
+        @(posedge clk2) disable iff(!$rose(clk2, @(posedge clk2))) seq2 |-> seq1;
     endproperty
 
     // Apply assertions to DUT signals
@@ -1675,6 +1678,54 @@ endmodule
     CHECK_DIAGS_EMPTY;
 }
 
+TEST_CASE("Checker clock inference") {
+    auto& text = R"(
+checker check_in_context (logic test_sig,
+                          event clk1,
+                          event clock = $inferred_clock,
+                          logic reset = $inferred_disable);
+    property p(logic sig);
+        1;
+    endproperty
+
+    sequence s;
+        @(clk1) 1 and @(clock) 1;
+    endsequence
+
+    a1: assert property (@clock disable iff (reset) p(test_sig));
+    c1: cover property (@clock !reset throughout !test_sig ##1 test_sig);
+
+    always_comb assert property (s);
+endchecker : check_in_context
+
+module m(logic rst);
+    wire clk;
+    logic a, en;
+    wire b = a && en;
+
+    // No context inference
+    check_in_context my_check1(.test_sig(b), .clk1(clk), .clock(clk), .reset(rst));
+
+    always @(negedge clk) begin
+        a <= 1;
+        if (en) begin
+            // inferred from context:
+            // .clock(negedge clk)
+            // .reset(1'b0)
+            check_in_context my_check2(a, negedge clk);
+        end
+        en <= 1;
+    end
+endmodule : m
+)";
+
+    Compilation compilation;
+    AnalysisManager analysisManager;
+
+    auto [diags, design] = analyze(text, compilation, analysisManager);
+    CHECK_DIAGS_EMPTY;
+}
+
 TEST_CASE("Checker default inferred clocks") {
     auto& text = R"(
 module top(input clk);
@@ -1802,4 +1853,132 @@ endmodule
     auto [diags, design] = analyze(text, compilation, analysisManager);
     REQUIRE(diags.size() == 1);
     CHECK(diags[0].code == diag::AssertionNoClock);
+}
+
+TEST_CASE("Sampled value clock resolution") {
+    auto& text = R"(
+module m;
+    logic a;
+    assert property (disable iff ($past(a)) @($rose(a)) a);
+
+    logic clk, clk2;
+    logic x, y = $rose(x);
+    always @(posedge clk) begin
+        @(negedge clk2);
+        x = $past(y, 5);
+    end
+
+    always @($fell(x)) begin end
+
+    wire z;
+    assign z = $past(x, 5);
+endmodule
+
+module n;
+    logic clk, clk2;
+    default clocking @clk; endclocking
+
+    logic x, y = $rose(x);
+    always @(posedge clk) begin
+        @(negedge clk2);
+        x = $past(y, 5);
+    end
+
+    always @($fell(x)) begin end
+
+    wire z;
+    assign z = $past(x, 5);
+endmodule
+)";
+
+    Compilation compilation;
+    AnalysisManager analysisManager;
+
+    auto [diags, design] = analyze(text, compilation, analysisManager);
+    REQUIRE(diags.size() == 6);
+    CHECK(diags[0].code == diag::SampledValueFuncClock);
+    CHECK(diags[1].code == diag::SampledValueFuncClock);
+    CHECK(diags[2].code == diag::SampledValueFuncClock);
+    CHECK(diags[3].code == diag::SampledValueFuncClock);
+    CHECK(diags[4].code == diag::SampledValueFuncClock);
+    CHECK(diags[5].code == diag::SampledValueFuncClock);
+}
+
+TEST_CASE("Triggered / matched clock resolution") {
+    auto& text = R"(
+module n(input logic a);
+endmodule
+
+module m;
+    sequence s;
+        1;
+    endsequence
+
+    initial begin
+        wait (s.triggered);
+    end
+
+    always @(s) begin end
+
+    wire w = s.triggered;
+
+    n n1(.a(s.triggered));
+
+    clocking cb @(s); endclocking
+
+    logic clk1, clk2;
+    sequence s2;
+        @(posedge clk2) 1 ##1 @(posedge clk1) 1;
+    endsequence
+
+    sequence s3;
+        @(posedge clk1) 1 ##1 @(posedge clk2) 1;
+    endsequence
+
+    assert property (disable iff (s.triggered) @s @(posedge clk1) s2.triggered || s3.triggered);
+    assert property (s.triggered || s.matched);
+    assert property (s.triggered);
+    assert property (s2.triggered);
+endmodule
+)";
+
+    Compilation compilation;
+    AnalysisManager analysisManager;
+
+    auto [diags, design] = analyze(text, compilation, analysisManager);
+    REQUIRE(diags.size() == 10);
+    CHECK(diags[0].code == diag::AssertionNoClock);
+    CHECK(diags[1].code == diag::AssertionNoClock);
+    CHECK(diags[2].code == diag::AssertionNoClock);
+    CHECK(diags[3].code == diag::AssertionNoClock);
+    CHECK(diags[4].code == diag::AssertionNoClock);
+    CHECK(diags[5].code == diag::AssertionNoClock);
+    CHECK(diags[6].code == diag::AssertionNoClock);
+    CHECK(diags[7].code == diag::SeqMethodEndClock);
+    CHECK(diags[8].code == diag::AssertionNoClock);
+    CHECK(diags[9].code == diag::AssertionNoClock);
+}
+
+TEST_CASE("Global future sampled value func with seq match items") {
+    auto& text = R"(
+module m(input logic clk, a, b, c);
+    global clocking @clk; endclocking
+
+    sequence s;
+        bit v;
+        (a, v = a) ##1 (b == v)[->1];
+    endsequence : s
+
+    // Illegal: a global clocking future sampled value function shall not
+    // be used in an assertion containing sequence match items
+    a2: assert property (@clk s |=> $future_gclk(c));
+endmodule
+)";
+
+    Compilation compilation;
+    AnalysisManager analysisManager;
+
+    auto [diags, design] = analyze(text, compilation, analysisManager);
+    REQUIRE(diags.size() == 1);
+    CHECK(diags[0].code == diag::GFSVMatchItems);
 }

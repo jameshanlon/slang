@@ -18,6 +18,7 @@ class Diagnostic;
 namespace slang::ast {
 
 class AssertionExpr;
+class AssertionInstanceExpression;
 class Expression;
 class Symbol;
 class TimingControl;
@@ -36,6 +37,10 @@ public:
     /// $inferred_clock system function.
     static bool isInferredClockCall(const ast::Expression& expr);
 
+    /// Helper method that returns true if the given expression is a call to
+    /// one of the sampled value system functions.
+    static bool isSampledValueFuncCall(const ast::Expression& expr);
+
     struct InferredClockResult {
         not_null<const ast::TimingControl*> clock;
         Diagnostic* diag = nullptr;
@@ -46,11 +51,12 @@ public:
     };
 
     struct ExpansionInstance {
-        const ast::AssertionExpr* expr = nullptr;
+        const ast::AssertionInstanceExpression* expr = nullptr;
         const ast::TimingControl* clock = nullptr;
         bool hasInferredClockArg = false;
 
-        ExpansionInstance(const ast::AssertionExpr& expr, const ast::TimingControl* clock);
+        ExpansionInstance(const ast::AssertionInstanceExpression& expr,
+                          const ast::TimingControl* clock);
     };
 
     /// Expands inferred clocking events in the given timing control expression.
@@ -58,6 +64,16 @@ public:
                                       const ast::TimingControl& timing,
                                       std::span<const ExpansionInstance> expansionStack,
                                       const AnalyzedProcedure* parentProcedure);
+
+    /// Checks the given expression for calls to sampled value functions and
+    /// ensures that they have explicit clocking provided.
+    static void checkSampledValueFuncs(AnalysisContext& context, const ast::Symbol& parentSymbol,
+                                       const ast::Expression& expr);
+
+    /// Checks the given timing control for calls to sampled value functions and
+    /// ensures that they have explicit clocking provided.
+    static void checkSampledValueFuncs(AnalysisContext& context, const ast::Symbol& parentSymbol,
+                                       const ast::TimingControl& timing);
 
 private:
     ClockInference() = delete;

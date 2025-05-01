@@ -359,6 +359,8 @@ bool AssertionExpr::checkAssertionCall(const CallExpression& call, const ASTCont
 }
 
 struct SampledValueExprVisitor {
+    using KnownSystemName = parsing::KnownSystemName;
+
     const ASTContext& context;
     bool isFutureGlobal;
     DiagCode localVarCode;
@@ -385,14 +387,14 @@ struct SampledValueExprVisitor {
                 case ExpressionKind::Call: {
                     auto& call = expr.template as<CallExpression>();
                     if (call.isSystemCall()) {
-                        if (call.getSubroutineName() == "matched"sv && !call.arguments().empty() &&
+                        auto ksn = call.getKnownSystemName();
+                        if (ksn == KnownSystemName::Matched && !call.arguments().empty() &&
                             call.arguments()[0]->type->isSequenceType()) {
                             context.addDiag(matchedCode, expr.sourceRange);
                         }
 
-                        if (isFutureGlobal && FutureGlobalNames.count(call.getSubroutineName())) {
+                        if (isFutureGlobal && SemanticFacts::isGlobalFutureSampledValueFunc(ksn))
                             context.addDiag(diag::GlobalSampledValueNested, expr.sourceRange);
-                        }
                     }
                     break;
                 }
@@ -403,10 +405,6 @@ struct SampledValueExprVisitor {
             }
         }
     }
-
-    static inline const flat_hash_set<std::string_view> FutureGlobalNames = {
-        "$future_gclk"sv, "$rising_gclk"sv, "$falling_gclk"sv, "$steady_gclk"sv,
-        "$changing_gclk"sv};
 };
 
 void AssertionExpr::checkSampledValueExpr(const Expression& expr, const ASTContext& context,
@@ -1249,7 +1247,7 @@ AssertionExpr::NondegeneracyCheckResult BinaryAssertionExpr::checkNondegeneracyI
     }
 
     return res;
-};
+}
 
 std::optional<SequenceRange> BinaryAssertionExpr::computeSequenceLengthImpl() const {
     const auto leftLen = left.computeSequenceLength();

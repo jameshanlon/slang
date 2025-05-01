@@ -10,6 +10,7 @@
 #include <array>
 #include <cstring>
 #include <memory>
+#include <vector>
 
 #include "slang/util/Util.h"
 
@@ -267,6 +268,27 @@ struct hash<std::tuple<TT...>> {
     size_t operator()(const std::tuple<TT...>& tt) const {
         size_t seed = 0;
         detail::hashing::HashValueImpl<std::tuple<TT...>>::apply(seed, tt);
+        return seed;
+    }
+};
+
+template<typename T, typename U>
+struct hash<std::pair<T, U>> {
+    using is_avalanching = void;
+    size_t operator()(std::pair<T, U> const& p) const noexcept {
+        size_t seed = 0;
+        hash_combine(seed, p.first, p.second);
+        return seed;
+    }
+};
+
+template<typename T>
+struct hash<std::vector<T>> {
+    using is_avalanching = void;
+    size_t operator()(std::vector<T> const& v) const noexcept {
+        size_t seed = 0;
+        for (const auto& elem : v)
+            hash_combine(seed, elem);
         return seed;
     }
 };

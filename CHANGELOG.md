@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 ### Language Support
 * Added support for clock flow, clock resolution, and clock inference rules in checkers and assertions
   * Various cases of invalid clock usage will now issue appropriate errors
+  * Clock resolution is also performed for the sampled value system functions
 * Implemented rules for which kinds of sequences and properties can be declared in clocking blocks
 * Implemented rules for dynamic variable access from within checker procedures
 
@@ -21,6 +22,12 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 * There is a new post-elaboration analysis pass in slang that does additional checking for enforcing specific language rules and reporting extra warnings. This can be disabled with the `--disable-analysis` flag, though it should not be needed unless there is a bug in slang.
 * Added a new option `--diag-abs-paths` to report diagnostics with absolute instead of relative file paths
 * Added [-Wmissing-return](https://sv-lang.com/warning-ref.html#missing-return) and [-Wincomplete-return](https://sv-lang.com/warning-ref.html#incomplete-return) which warn about non-void functions that do not return a value on all control paths
+* Added [-Wcase-unreachable](https://sv-lang.com/warning-ref.html#case-unreachable) for wildcard case items that are unreachable because they are completely subsumed by earlier items
+* Added [-Wcase-too-complex](https://sv-lang.com/warning-ref.html#case-too-complex) for case statements that are too complex to analyze, and `--max-case-analysis-steps` to control that limit
+* Added [-Wcase-incomplete](https://sv-lang.com/warning-ref.html#case-incomplete) for wildcard case statements that don't completely cover the input space and have no default case
+* Added [-Wcase-redundant-default](https://sv-lang.com/warning-ref.html#case-redundant-default) for case statements marked `unique` or `priority` that provide a default case
+* Added [-Wcase-wildcard-2state](https://sv-lang.com/warning-ref.html#case-wildcard-2state) for wildcard case statements that have 2-state conditions and items
+* The `` `celldefine `` directive is now exposed in the API and in AST serialization (thanks to @whitequark)
 
 ### Improvements
 * slang now performs instance caching by default, which means duplicate instance bodies will not be visited during elaboration, which can greatly speed up elaboration times for large projects. This behavior can be disabled with the `--disable-instance-caching` flag, though it should not be needed unless there's a bug in slang -- please open an issue if you find that you need the flag.
@@ -28,6 +35,7 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 * Added a bunch more tests for the pyslang bindings (thanks to @parker-research)
 * Added pyslang bindings for the SyntaxRewriter class (thanks to @parker-research)
 * -Wint-bool-conv now applies to expressions used in assertions, properties, and sequences
+* Added a port prefix rule to slang-tidy, similar to the existing port suffix rule (thanks to @corco)
 
 ### Fixes
 * The restriction on interface instances targeted by defparams not being allowed with virtual interfaces was also erroneously applied to interface port connections
@@ -45,6 +53,10 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 * Fixed a case where no diagnostic would be issued when incorrectly referring to an instance array element from within an expression
 * Fixed various issues with how instance array indices are mapped to underlying elements
 * Fixed SyntaxPrinter printing of directives that have skipped leading trivia
+* Fixed a bug in the constant evaluation of division between two positive signed integers; the sign flag was lost and the result was always treated as unsigned
+* Assignments are now correctly disallowed in timing controls
+* Cycle delays are now correctly disallowed in event trigger statements
+* The global future sampled value system functions are now correctly disallowed in assertions with sequence match items
 
 
 ## [v8.0] - 2025-02-05

@@ -549,9 +549,8 @@ static std::string_view toString(TimingPathSymbol::Polarity polarity) {
             return "Positive"sv;
         case TimingPathSymbol::Polarity::Negative:
             return "Negative"sv;
-        default:
-            SLANG_UNREACHABLE;
     }
+    SLANG_UNREACHABLE;
 }
 
 void TimingPathSymbol::serializeTo(ASTSerializer& serializer) const {
@@ -1003,8 +1002,6 @@ void SystemTimingCheckSymbol::resolve() const {
                 argBuf.emplace_back(expr);
                 break;
             }
-            default:
-                SLANG_UNREACHABLE;
         }
     }
 

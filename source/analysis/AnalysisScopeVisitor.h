@@ -7,6 +7,8 @@
 //------------------------------------------------------------------------------
 #pragma once
 
+#include "NonProceduralExprVisitor.h"
+
 #include "slang/ast/ASTVisitor.h"
 #include "slang/diagnostics/AnalysisDiags.h"
 #include "slang/util/TypeTraits.h"
@@ -38,6 +40,7 @@ struct AnalysisScopeVisitor {
             return;
 
         result.childScopes.emplace_back(manager.analyzeSymbol(symbol));
+        visitExprs(symbol);
     }
 
     void visit(const CheckerInstanceSymbol& symbol) {
@@ -46,6 +49,7 @@ struct AnalysisScopeVisitor {
             return;
 
         result.childScopes.emplace_back(manager.analyzeSymbol(symbol));
+        visitExprs(symbol);
     }
 
     void visit(const PackageSymbol& symbol) {
@@ -97,6 +101,7 @@ struct AnalysisScopeVisitor {
 
     void visit(const CovergroupType& symbol) {
         result.childScopes.emplace_back(manager.analyzeSymbol(symbol));
+        visitExprs(symbol);
     }
 
     void visit(const GenericClassDefSymbol& symbol) {
@@ -105,6 +110,8 @@ struct AnalysisScopeVisitor {
     }
 
     void visit(const NetSymbol& symbol) {
+        visitExprs(symbol);
+
         if (symbol.isImplicit) {
             checkValueUnused(symbol, diag::UnusedImplicitNet, diag::UnusedImplicitNet,
                              diag::UnusedImplicitNet);
@@ -115,6 +122,8 @@ struct AnalysisScopeVisitor {
     }
 
     void visit(const VariableSymbol& symbol) {
+        visitExprs(symbol);
+
         if (symbol.flags.has(VariableFlags::CompilerGenerated))
             return;
 
@@ -214,12 +223,14 @@ struct AnalysisScopeVisitor {
                          SpecifyBlockSymbol, CovergroupBodySymbol, CoverCrossSymbol,
                          CoverCrossBodySymbol, StatementBlockSymbol, RandSeqProductionSymbol>)
     void visit(const T& symbol) {
+        visitExprs(symbol);
+
         // For these symbol types we just descend into their members
         // and flatten them into their parent scope.
         visitMembers(symbol);
     }
 
-    // Everything else doesn't need to be analyzed.
+    // Everything else doesn't need to be analyzed (except visiting expressions, if necessary).
     template<typename T>
         requires(
             IsAnyOf<T, InvalidSymbol, RootSymbol, CompilationUnitSymbol, DefinitionSymbol,
@@ -233,13 +244,23 @@ struct AnalysisScopeVisitor {
                     SystemTimingCheckSymbol, NetAliasSymbol, ConfigBlockSymbol, NetType,
                     CheckerInstanceBodySymbol> ||
             std::is_base_of_v<Type, T>)
-    void visit(const T&) {}
+    void visit(const T& symbol) {
+        visitExprs(symbol);
+    }
 
 private:
     template<typename T>
     void visitMembers(const T& symbol) {
         for (auto& member : symbol.members())
             member.visit(*this);
+    }
+
+    template<typename T>
+    void visitExprs(const T& symbol) {
+        if constexpr (HasVisitExprs<T, NonProceduralExprVisitor>) {
+            NonProceduralExprVisitor visitor(context, symbol);
+            symbol.visitExprs(visitor);
+        }
     }
 
     void checkValueUnused(const ValueSymbol& symbol, DiagCode unusedCode,

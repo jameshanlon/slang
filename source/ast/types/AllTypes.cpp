@@ -42,8 +42,8 @@ bitwidth_t getWidth(PredefinedIntegerType::Kind kind) {
         case PredefinedIntegerType::Byte: return 8;
         case PredefinedIntegerType::Integer: return 32;
         case PredefinedIntegerType::Time: return 64;
-        default: SLANG_UNREACHABLE;
     }
+    SLANG_UNREACHABLE;
 }
 
 bool getSigned(PredefinedIntegerType::Kind kind) {
@@ -54,8 +54,8 @@ bool getSigned(PredefinedIntegerType::Kind kind) {
         case PredefinedIntegerType::Byte: return true;
         case PredefinedIntegerType::Integer: return true;
         case PredefinedIntegerType::Time: return false;
-        default: SLANG_UNREACHABLE;
     }
+    SLANG_UNREACHABLE;
 }
 
 bool getFourState(PredefinedIntegerType::Kind kind) {
@@ -66,8 +66,8 @@ bool getFourState(PredefinedIntegerType::Kind kind) {
         case PredefinedIntegerType::Byte: return false;
         case PredefinedIntegerType::Integer: return true;
         case PredefinedIntegerType::Time: return true;
-        default: SLANG_UNREACHABLE;
     }
+    SLANG_UNREACHABLE;
 }
 
 std::string_view getName(PredefinedIntegerType::Kind kind) {
@@ -78,8 +78,8 @@ std::string_view getName(PredefinedIntegerType::Kind kind) {
         case PredefinedIntegerType::Byte: return "byte"sv;
         case PredefinedIntegerType::Integer: return "integer"sv;
         case PredefinedIntegerType::Time: return "time"sv;
-        default: SLANG_UNREACHABLE;
     }
+    SLANG_UNREACHABLE;
 }
 
 std::string_view getName(ScalarType::Kind kind) {
@@ -87,8 +87,8 @@ std::string_view getName(ScalarType::Kind kind) {
         case ScalarType::Bit: return "bit"sv;
         case ScalarType::Logic: return "logic"sv;
         case ScalarType::Reg: return "reg"sv;
-        default: SLANG_UNREACHABLE;
     }
+    SLANG_UNREACHABLE;
 }
 
 std::string_view getName(FloatingType::Kind kind) {
@@ -96,8 +96,8 @@ std::string_view getName(FloatingType::Kind kind) {
         case FloatingType::Real: return "real"sv;
         case FloatingType::ShortReal: return "shortreal"sv;
         case FloatingType::RealTime: return "realtime"sv;
-        default: SLANG_UNREACHABLE;
     }
+    SLANG_UNREACHABLE;
 }
 // clang-format on
 
@@ -378,12 +378,12 @@ const Type& EnumType::fromSyntax(Compilation& comp, const EnumTypeSyntax& syntax
         }
 
         ev.getValue();
-        if (!initExpr->constant)
+        if (!initExpr->getConstant())
             return;
 
         // An enumerated name with x or z assignments assigned to an enum with no explicit data type
         // or an explicit 2-state declaration shall be a syntax error.
-        auto& value = initExpr->constant->integer();
+        auto& value = initExpr->getConstant()->integer();
         if (!base->isFourState() && value.hasUnknown()) {
             context.addDiag(diag::EnumValueUnknownBits, previousRange) << value << *base;
             return;

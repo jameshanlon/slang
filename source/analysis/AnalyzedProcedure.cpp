@@ -7,6 +7,7 @@
 //------------------------------------------------------------------------------
 #include "slang/analysis/AnalyzedProcedure.h"
 
+#include "slang/analysis/ClockInference.h"
 #include "slang/analysis/DataFlowAnalysis.h"
 #include "slang/diagnostics/AnalysisDiags.h"
 #include "slang/text/FormatBuffer.h"
@@ -53,7 +54,7 @@ AnalyzedProcedure::AnalyzedProcedure(AnalysisContext& context, const Symbol& ana
                                      const AnalyzedProcedure* parentProcedure) :
     analyzedSymbol(&analyzedSymbol), parentProcedure(parentProcedure) {
 
-    DataFlowAnalysis dfa(context, analyzedSymbol);
+    DataFlowAnalysis dfa(context, analyzedSymbol, true);
     switch (analyzedSymbol.kind) {
         case SymbolKind::ProceduralBlock:
             dfa.run(analyzedSymbol.as<ProceduralBlockSymbol>().getBody());
@@ -68,6 +69,51 @@ AnalyzedProcedure::AnalyzedProcedure(AnalysisContext& context, const Symbol& ana
     if (dfa.bad)
         return;
 
+    if (parentProcedure || !dfa.getAssertions().empty() || !dfa.getSampledValueCalls().empty()) {
+        // All flavors of always and initial blocks can infer a clock.
+        if (analyzedSymbol.kind == SymbolKind::ProceduralBlock &&
+            analyzedSymbol.as<ProceduralBlockSymbol>().procedureKind !=
+                ProceduralBlockKind::Final) {
+            inferredClock = dfa.inferClock(parentProcedure);
+        }
+
+        // If no procedural inferred clock, check the scope for a default clocking block.
+        if (!inferredClock) {
+            auto scope = analyzedSymbol.getParentScope();
+            SLANG_ASSERT(scope);
+
+            if (auto defaultClocking = scope->getCompilation().getDefaultClocking(*scope))
+                inferredClock = &defaultClocking->as<ClockingBlockSymbol>().getEvent();
+        }
+
+        if (inferredClock && inferredClock->bad())
+            return;
+
+        for (auto& var : dfa.getAssertions()) {
+            if (auto stmtPtr = std::get_if<const Statement*>(&var)) {
+                auto& stmt = **stmtPtr;
+                if (stmt.kind == StatementKind::ProceduralChecker) {
+                    for (auto inst : stmt.as<ProceduralCheckerStatement>().instances)
+                        assertions.emplace_back(context, inferredClock, *this, stmt, inst);
+                }
+                else {
+                    assertions.emplace_back(context, inferredClock, *this, stmt, nullptr);
+                }
+            }
+            else {
+                auto& expr = *std::get<const Expression*>(var);
+                assertions.emplace_back(context, inferredClock, this, analyzedSymbol, expr);
+            }
+        }
+
+        // If we have no inferred clock then all sampled value system calls must provide
+        // a clocking argument explicitly.
+        if (!inferredClock) {
+            for (auto call : dfa.getSampledValueCalls())
+                ClockInference::checkSampledValueFuncs(context, analyzedSymbol, *call);
+        }
+    }
+
     if (analyzedSymbol.kind == SymbolKind::ProceduralBlock) {
         auto& procedure = analyzedSymbol.as<ProceduralBlockSymbol>();
         if (procedure.procedureKind == ProceduralBlockKind::AlwaysComb) {
@@ -77,30 +123,6 @@ AnalyzedProcedure::AnalyzedProcedure(AnalysisContext& context, const Symbol& ana
 
                 context.addDiag(procedure, diag::InferredLatch, expr.sourceRange) << buffer.str();
             });
-        }
-
-        if (!dfa.getAssertionStatements().empty() || parentProcedure) {
-            inferredClock = dfa.inferClock(parentProcedure);
-            if (!inferredClock) {
-                auto scope = procedure.getParentScope();
-                SLANG_ASSERT(scope);
-
-                if (auto defaultClocking = scope->getCompilation().getDefaultClocking(*scope))
-                    inferredClock = &defaultClocking->as<ClockingBlockSymbol>().getEvent();
-            }
-
-            if (inferredClock && inferredClock->bad())
-                return;
-
-            for (auto stmt : dfa.getAssertionStatements()) {
-                if (stmt->kind == StatementKind::ProceduralChecker) {
-                    for (auto inst : stmt->as<ProceduralCheckerStatement>().instances)
-                        assertions.emplace_back(context, inferredClock, *this, *stmt, inst);
-                }
-                else {
-                    assertions.emplace_back(context, inferredClock, *this, *stmt, nullptr);
-                }
-            }
         }
     }
     else if (analyzedSymbol.kind == SymbolKind::Subroutine) {
@@ -123,13 +145,6 @@ AnalyzedProcedure::AnalyzedProcedure(AnalysisContext& context, const Symbol& ana
                         << subroutine.name;
                 }
             }
-        }
-
-        // Concurrent assertions cannot appear in tasks and functions, but expect
-        // statements can appear in tasks and need to be analyzed just like an assert.
-        for (auto stmt : dfa.getAssertionStatements()) {
-            if (stmt->kind != StatementKind::ProceduralChecker)
-                assertions.emplace_back(context, nullptr, *this, *stmt, nullptr);
         }
     }
 }
