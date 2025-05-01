@@ -262,8 +262,7 @@ struct ProceduralAnalysis
         auto itBounds = assIt.bounds();
 
         // Existing entry completely contains new bounds.
-        if (itBounds.first <= bounds->first &&
-            itBounds.second >= bounds->second) {
+        if (ConstantRange(itBounds).contains(ConstantRange(*bounds))) {
           // Split entry.
           assigned.erase(assIt, bitMapAllocator);
           assigned.insert({itBounds.first, bounds->first}, *assIt, bitMapAllocator);
@@ -272,8 +271,7 @@ struct ProceduralAnalysis
         }
 
         // New bounds completely contain an existing entry.
-        if (bounds->first < itBounds.first &&
-            bounds->second > itBounds.second) {
+        if (ConstantRange(*bounds).contains(ConstantRange(itBounds))) {
           // Delete entry.
           assigned.erase(assIt, bitMapAllocator);
           assIt = assigned.find(*bounds);
@@ -286,19 +284,18 @@ struct ProceduralAnalysis
       // Update LSP map.
       auto &lspMap = lvalues[index].assigned;
       for (auto lspIt = lspMap.find(*bounds); lspIt != lspMap.end();) {
+
         // If we find an existing entry that completely contains
         // the new bounds we can just keep that one and ignore the
         // new one. Otherwise we will insert a new entry.
         auto itBounds = lspIt.bounds();
-        if (itBounds.first <= bounds->first &&
-            itBounds.second >= bounds->second) {
+        if (ConstantRange(itBounds).contains(ConstantRange(*bounds))) {
           return;
         }
 
         // If the new bounds completely contain the existing entry, we can
         // remove it.
-        if (bounds->first < itBounds.first &&
-            bounds->second > itBounds.second) {
+        if (ConstantRange(*bounds).contains(ConstantRange(itBounds))) {
           lspMap.erase(lspIt, lspMapAllocator);
           lspIt = lspMap.find(*bounds);
         } else {
@@ -322,8 +319,7 @@ struct ProceduralAnalysis
         auto itBounds = it.bounds();
 
         // Existing entry completely contains new bounds.
-        if (itBounds.first <= bounds->first &&
-            itBounds.second >= bounds->second) {
+        if (ConstantRange(itBounds).contains(ConstantRange(*bounds))) {
       
           // Add an edge from the variable to the current state node.
           auto &currState = getState();
@@ -333,8 +329,7 @@ struct ProceduralAnalysis
         }
 
         // New bounds completely contain an existing entry.
-        if (bounds->first < itBounds.first &&
-            bounds->second > itBounds.second) {
+        if (ConstantRange(*bounds).contains(ConstantRange(itBounds))) {
           
           // Add an edge from the variable to the current state node.
           auto &currState = getState();
