@@ -204,6 +204,18 @@ struct ProceduralAnalysis
     isLValue = false;
     return guard;
   }
+ 
+  /// Find the LSP for the symbol with the given index and bounds. 
+  const ast::Expression *findLsp(uint32_t index, std::pair<uint64_t, uint64_t> bounds) {
+    auto &lspMap = lvalues[index].assigned;
+    for (auto lspIt = lspMap.find(bounds); lspIt != lspMap.end(); lspIt++) {
+      if (ConstantRange(lspIt.bounds()) == ConstantRange(bounds)) {
+        return *lspIt;
+      }
+    } 
+    // Shouldn't get here.
+    SLANG_UNREACHABLE;
+  }
 
   void noteReference(const ast::ValueSymbol &symbol,
                      const ast::Expression &lsp) {
@@ -422,24 +434,45 @@ struct ProceduralAnalysis
 
       for (size_t i = 0; i < result.assigned.size(); i++) {
 
-        // Intersecting assignments.
+        // Determine intersecting assignments.
         auto updated =
             result.assigned[i].intersection(other.assigned[i], bitMapAllocator);
 
-        // Create a new node for each interval in updated.
-        // For each interval in result, other, if overlaps the updated
-        // interval, add an edge.
+        // For each interval in the intersection, and a node and any edges to
+        // that node.
+        for (auto updatedIt = updated.begin(); updatedIt != updated.end(); updatedIt++) {
 
-        result.assigned[i] = updated;
+            // Create a new node for each interval in updated.
+            auto* lsp = findLsp(i, updatedIt.bounds());
+            auto& node = graph.addNode(
+                std::make_unique<VariableReference>(*lvalues[i].symbol.get(), *lsp));
+
+            // Attach the node to the new interval.
+            *updatedIt = &node;
+
+            // For each interval in 'result' add out edges.
+            for (auto resultIt = result.assigned[i].find(updatedIt.bounds());
+                 resultIt != result.assigned[i].end(); resultIt++) {
+              graph.addEdge(*const_cast<NetlistNode*>(*resultIt), node);
+            }
+            
+            // For each interval in 'other' add out edges.
+            for (auto otherIt = other.assigned[i].find(updatedIt.bounds());
+                 otherIt != other.assigned[i].end(); otherIt++) {
+              graph.addEdge(*const_cast<NetlistNode*>(*otherIt), node);
+            }
+        }
+
+        result.assigned[i] = std::move(updated);
       }
 
-      // Create a join node.
-      auto &node = graph.addNode(std::make_unique<Join>());
-      result.node = &node;
+      //// Create a join node.
+      //auto &node = graph.addNode(std::make_unique<Join>());
+      //result.node = &node;
 
-      if (other.node) {
-        graph.addEdge(*other.node, node);
-      }
+      //if (other.node) {
+      //  graph.addEdge(*other.node, node);
+      //}
 
     } else if (!result.reachable) {
       result = copyState(other);
