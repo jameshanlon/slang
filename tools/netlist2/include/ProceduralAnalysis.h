@@ -426,8 +426,16 @@ struct ProceduralAnalysis
       }
 
       for (size_t i = 0; i < result.assigned.size(); i++) {
-        result.assigned[i] =
+
+        // Intersecting assignments.
+        auto updated =
             result.assigned[i].intersection(other.assigned[i], bitMapAllocator);
+
+        // Create a new node for each interval in updated.
+        // For each interval in result, other, if overlaps the updated
+        // interval, add an edge.
+
+        result.assigned[i] = updated;
       }
 
       // Create a join node.
