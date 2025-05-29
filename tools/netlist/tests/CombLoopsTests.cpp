@@ -166,3 +166,20 @@ endmodule
               return (netlist.getNode(node).kind == NodeKind::VariableReference);
           }) == 6);
 }
+
+TEST_CASE("Bug #1385 should not be a combinatorial loop") {
+    auto tree = SyntaxTree::fromText(R"(
+module m();
+  wire [10:0] w;
+  assign w[0] = w[3];
+endmodule
+)");
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+    NO_COMPILATION_ERRORS;
+    auto netlist = createNetlist(compilation);
+    ElementaryCyclesSearch ecs(netlist);
+    std::vector<CycleListType>* cycles_ptr = ecs.getElementaryCycles();
+    CHECK(cycles_ptr->size() == 0);
+}
+

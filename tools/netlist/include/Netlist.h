@@ -481,7 +481,7 @@ public:
 
             // Find variable declaration nodes in the graph that have multiple
             // outgoing edges.
-            if (node->kind == NodeKind::VariableDeclaration && node->outDegree() > 1) {
+            if (node->kind == NodeKind::VariableDeclaration && node->outDegree() >= 1) {
                 auto& varDeclNode = node->as<NetlistVariableDeclaration>();
                 auto& varType = varDeclNode.symbol.getDeclaredType()->getType();
                 DEBUG_PRINT("Variable {} has type {}\n", varDeclNode.hierarchicalPath,
@@ -542,6 +542,9 @@ public:
 
             // Record the alias on the orginal declaration.
             mod.varDecl->addAlias(&varAliasNode);
+
+            // Add an edge from the declaration to the alias.
+            mod.varDecl->addEdge(varAliasNode);
 
             // Create the in edge to the new node.
             mod.inEdge->getSourceNode().addEdge(varAliasNode);
