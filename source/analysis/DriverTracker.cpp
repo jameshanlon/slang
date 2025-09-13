@@ -154,8 +154,15 @@ void DriverTracker::propagateModportDrivers(AnalysisContext& context, DriverAllo
 
         localCopy.cvisit_all([&](auto& item) {
             if (auto expr = item.first->template as<ModportPortSymbol>().getConnectionExpr()) {
-                for (auto& [originalDriver, _] : item.second)
-                    propagateModportDriver(context, driverAlloc, *expr, *originalDriver);
+                for (auto& [originalDriver, bounds] : item.second) {
+                   propagateModportDriver(context, driverAlloc, *expr, *originalDriver);
+
+                   // Once the modport driver has been propagated, add it back to the symbolDrivers map for querying.
+                   auto updateFunc = [&](auto& elem) {
+                      elem.second.insert(bounds, originalDriver, driverAlloc);
+                   };
+                   symbolDrivers.try_emplace_and_visit(item.first, updateFunc, updateFunc);
+                }
             }
         });
     }
@@ -235,18 +242,6 @@ void DriverTracker::addDrivers(AnalysisContext& context, DriverAlloc& driverAllo
 
 DriverList DriverTracker::getDrivers(const ValueSymbol& symbol) const {
     DriverList drivers;
-
-    // If the symbol is a modport member, then return from the modport drivers.
-    if (symbol.kind == SymbolKind::ModportPort) {
-        modportPortDrivers.cvisit(&symbol, [&drivers](auto& item) {
-            for (auto& [driverSymbol, bounds] : item.second) {
-                drivers.emplace_back(driverSymbol, bounds);
-            }
-        });
-        return drivers;
-    }
-
-    // Otherwise lookup the generic drivers.
     symbolDrivers.cvisit(&symbol, [&drivers](auto& item) {
         for (auto it = item.second.begin(); it != item.second.end(); ++it)
             drivers.emplace_back(*it, it.bounds());
