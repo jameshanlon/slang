@@ -3,7 +3,7 @@
 
 #include "AnalysisTests.h"
 
-TEST_CASE("Class method driver crash regress GH #552") {
+TEST_CASE("Driver analysis with interfaces and modports") {
     auto& code = R"(
 interface I;
     logic l;
